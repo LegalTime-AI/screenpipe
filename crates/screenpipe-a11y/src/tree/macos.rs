@@ -13,7 +13,10 @@ use anyhow::Result;
 use chrono::Utc;
 use cidre::{arc, arc::Retained, ax, cf, ns};
 use screenpipe_core::window_pattern::{self, WindowPattern};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -288,6 +291,175 @@ fn looks_like_url(s: &str) -> bool {
 static ENHANCED_MODE_CACHE: std::sync::LazyLock<super::enhanced_mode_cache::EnhancedModeCache> =
     std::sync::LazyLock::new(super::enhanced_mode_cache::EnhancedModeCache::with_default_ttl);
 
+/// Evict enhanced-mode eligibility verdicts for pids not seen in this long.
+/// Matches the eviction horizon of [`ENHANCED_MODE_CACHE`] (5 × 60s TTL) so
+/// both maps forget a pid on the same schedule.
+const ENHANCED_MODE_ELIGIBILITY_EVICT_AFTER: Duration = Duration::from_secs(300);
+
+/// Per-pid verdict cache for [`should_poke_enhanced_mode`]: `pid → (last
+/// seen, eligible)`. Resolving the bundle and scanning `Contents/Frameworks`
+/// costs an NSRunningApplication round trip plus a handful of directory
+/// reads — do it once per pid, not on every walk. Every hit refreshes the
+/// timestamp and stale pids are evicted on access (same pattern as
+/// [`super::enhanced_mode_cache::EnhancedModeCache`]), so a recycled pid
+/// can't inherit a dead app's verdict for long.
+static ENHANCED_MODE_ELIGIBILITY: std::sync::LazyLock<Mutex<HashMap<i32, (Instant, bool)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Apps never poked into enhanced AX mode even when they carry the
+/// Chromium/Electron bundle signature. `AXEnhancedUserInterface` is the flag
+/// VoiceOver sets, so apps that key assistive-technology behavior on it
+/// change how they treat user input. Microsoft Outlook (legacy) is the
+/// incident that earned this list: with the flag set it auto-commits the
+/// first To: autocomplete suggestion while the user is still typing, and the
+/// flag latches for the process lifetime. New Outlook isn't Electron, so the
+/// family detector already excludes it — the deny list documents intent and
+/// guards future WebView-based Office shells. Every Microsoft app is denied
+/// except Edge, an ordinary Chromium browser that needs the poke like Chrome.
+const ENHANCED_MODE_DENY_NAME_PARTS: &[&str] = &["outlook"];
+const ENHANCED_MODE_DENY_BUNDLE_PREFIX: &str = "com.microsoft.";
+const ENHANCED_MODE_ALLOW_BUNDLE_IDS: &[&str] = &["com.microsoft.edgemac"];
+
+/// Pure deny check on (lowercased localized name, bundle id). Split from
+/// [`should_poke_enhanced_mode`] so it can be unit-tested without a live pid.
+fn is_enhanced_mode_denied(app_lower: &str, bundle_id: Option<&str>) -> bool {
+    if ENHANCED_MODE_DENY_NAME_PARTS
+        .iter()
+        .any(|part| app_lower.contains(part))
+    {
+        return true;
+    }
+    let Some(bundle_id) = bundle_id else {
+        return false;
+    };
+    // Bundle ids compare case-insensitively — Outlook ships as
+    // "com.microsoft.Outlook".
+    let bundle_lower = bundle_id.to_ascii_lowercase();
+    bundle_lower.starts_with(ENHANCED_MODE_DENY_BUNDLE_PREFIX)
+        && !ENHANCED_MODE_ALLOW_BUNDLE_IDS.contains(&bundle_lower.as_str())
+}
+
+/// Upper bound on directory entries examined per level while scanning a
+/// bundle for the Chromium signature. Real `Frameworks/` dirs are tiny
+/// (Chrome: 1 entry; large Electron apps: ~20) — the bound only exists so a
+/// pathological bundle can't stall the walk.
+const BUNDLE_SCAN_MAX_ENTRIES: usize = 64;
+
+/// True when the `.app` bundle at `root` is Chromium- or Electron-based:
+/// anything under `Contents/Frameworks/` named "Electron Framework…" or
+/// "Chromium Embedded Framework…", or a "* Helper (Renderer).app" — as a
+/// direct child (Electron apps: Obsidian, Slack, Discord, …) or one level
+/// inside `*.framework/Versions/*/Helpers/` (Chrome-derived browsers:
+/// Chrome, Edge, Brave, Arc, Vivaldi, Opera, …). The scan is shallow and
+/// bounded — no recursion.
+fn bundle_signals_chromium(root: &Path) -> bool {
+    let frameworks = root.join("Contents").join("Frameworks");
+    let Ok(entries) = std::fs::read_dir(&frameworks) else {
+        // No Frameworks dir (or unreadable) → not Chromium/Electron.
+        return false;
+    };
+    for entry in entries.flatten().take(BUNDLE_SCAN_MAX_ENTRIES) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.contains("Electron Framework")
+            || name.contains("Chromium Embedded Framework")
+            || is_renderer_helper_name(&name)
+        {
+            return true;
+        }
+        if name.ends_with(".framework") && framework_has_renderer_helper(&entry.path()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// "<App> Helper (Renderer).app" — the renderer child-process bundle every
+/// Chromium/Electron app ships.
+fn is_renderer_helper_name(name: &str) -> bool {
+    name.ends_with(" Helper (Renderer).app")
+}
+
+/// Chrome-derived browsers nest their helpers one level down:
+/// `<X>.framework/Versions/<v>/Helpers/<X> Helper (Renderer).app`.
+fn framework_has_renderer_helper(framework_dir: &Path) -> bool {
+    let Ok(versions) = std::fs::read_dir(framework_dir.join("Versions")) else {
+        return false;
+    };
+    for version in versions.flatten().take(BUNDLE_SCAN_MAX_ENTRIES) {
+        let Ok(helpers) = std::fs::read_dir(version.path().join("Helpers")) else {
+            continue;
+        };
+        for helper in helpers.flatten().take(BUNDLE_SCAN_MAX_ENTRIES) {
+            if is_renderer_helper_name(&helper.file_name().to_string_lossy()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when `pid`'s app carries the Chromium/Electron bundle signature.
+/// Default-safe: any resolution failure (no running app for the pid, no
+/// bundle URL, unreadable bundle) returns `false` — never poke an app we
+/// can't identify.
+fn is_chromium_family(pid: i32) -> bool {
+    let bundle_root = cidre::objc::ar_pool(|| {
+        ns::RunningApp::with_pid(pid)
+            .and_then(|app| app.bundle_url())
+            .and_then(|url| url.path())
+            .map(|path| PathBuf::from(path.to_string()))
+    });
+    match bundle_root {
+        Some(root) => bundle_signals_chromium(&root),
+        None => false,
+    }
+}
+
+fn bundle_id_for_pid(pid: i32) -> Option<String> {
+    cidre::objc::ar_pool(|| {
+        ns::RunningApp::with_pid(pid)
+            .and_then(|app| app.bundle_id())
+            .map(|s| s.to_string())
+    })
+}
+
+/// Gate for the enhanced-AX-mode poke: only Chromium/Electron apps (minus
+/// the Microsoft deny list) are ever poked. Verdicts are cached per pid in
+/// [`ENHANCED_MODE_ELIGIBILITY`]; both inputs (bundle layout, app identity)
+/// are fixed for the life of a pid.
+fn should_poke_enhanced_mode(pid: i32, app_lower: &str) -> bool {
+    let now = Instant::now();
+    {
+        // Recover from poison: the map is still valid if a holder panicked.
+        let mut map = match ENHANCED_MODE_ELIGIBILITY.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        map.retain(|_, (last_seen, _)| {
+            now.saturating_duration_since(*last_seen) < ENHANCED_MODE_ELIGIBILITY_EVICT_AFTER
+        });
+        if let Some((last_seen, eligible)) = map.get_mut(&pid) {
+            *last_seen = now;
+            return *eligible;
+        }
+    }
+    // Cache miss — compute outside the lock (ObjC + filesystem work).
+    let family = is_chromium_family(pid);
+    let denied = family && is_enhanced_mode_denied(app_lower, bundle_id_for_pid(pid).as_deref());
+    let eligible = family && !denied;
+    debug!(
+        "enhanced AX mode eligibility for pid={} app={}: chromium_family={} denied={}",
+        pid, app_lower, family, denied
+    );
+    let mut map = match ENHANCED_MODE_ELIGIBILITY.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.insert(pid, (now, eligible));
+    eligible
+}
+
 /// macOS tree walker using cidre's AX bindings.
 pub struct MacosTreeWalker {
     config: TreeWalkerConfig,
@@ -368,12 +540,23 @@ impl MacosTreeWalker {
         // Ref: https://codereview.chromium.org/6909013
         // Ref: https://github.com/electron/electron/issues/7206
         //
-        // The toggle is expensive (the renderer rebuilds its AX tree each time
-        // we poke it), so we only re-assert it once per TTL per pid. Chromium
-        // latches the mode so one poke is plenty; if the renderer ever drops
-        // the mode we recover on the next TTL window.
+        // The poke is Chromium/Electron-ONLY (`should_poke_enhanced_mode`):
+        // AXEnhancedUserInterface is the flag VoiceOver sets, so any app that
+        // keys assistive-technology behavior on it flips into screen-reader
+        // mode — Microsoft Outlook (legacy) starts auto-committing the first
+        // To: autocomplete suggestion while the user is still typing, and the
+        // flag latches for the process lifetime. Native apps expose full AX
+        // trees without the poke, so outside the Chromium family it is pure
+        // risk.
+        //
+        // The toggle is also expensive (the renderer rebuilds its AX tree each
+        // time we poke it), so we only assert it once per focused pid — see
+        // `should_enable_once`. Eligibility runs first so skipped apps never
+        // enter the set-once bookkeeping (a recycled pid must not lose its one
+        // poke to a previous non-Chromium occupant).
         let mut ax_mode_changed = false;
-        if ENHANCED_MODE_CACHE.should_enable_once(pid) {
+        if should_poke_enhanced_mode(pid, &app_lower) && ENHANCED_MODE_CACHE.should_enable_once(pid)
+        {
             let eui_attr_name = cf::String::from_str("AXEnhancedUserInterface");
             let eui_attr = ax::Attr::with_string(&eui_attr_name);
 
@@ -2378,5 +2561,108 @@ mod tests {
         assert!(!is_vscode_terminal_list_role("AXGroup", 30, &app));
         assert!(!is_vscode_terminal_list_role("AXStaticText", 30, &app));
         assert!(!is_vscode_terminal_list_role("AXWebArea", 30, &app));
+    }
+
+    /// Build a fake `.app` bundle in a tempdir with the given directories
+    /// created under `Contents/Frameworks/`.
+    fn make_bundle(framework_dirs: &[&str]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in framework_dirs {
+            std::fs::create_dir_all(tmp.path().join("Contents/Frameworks").join(dir)).unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn test_bundle_signals_chromium_electron_framework() {
+        let tmp = make_bundle(&["Electron Framework.framework"]);
+        assert!(bundle_signals_chromium(tmp.path()));
+    }
+
+    #[test]
+    fn test_bundle_signals_chromium_cef_framework() {
+        let tmp = make_bundle(&["Chromium Embedded Framework.framework"]);
+        assert!(bundle_signals_chromium(tmp.path()));
+    }
+
+    #[test]
+    fn test_bundle_signals_chromium_direct_renderer_helper() {
+        // Electron layout: helper apps are direct children of Frameworks/.
+        let tmp = make_bundle(&["Obsidian Helper (Renderer).app"]);
+        assert!(bundle_signals_chromium(tmp.path()));
+    }
+
+    #[test]
+    fn test_bundle_signals_chromium_chrome_style_nested_helper() {
+        // Chrome-derived layout: Frameworks/<X>.framework/Versions/<v>/Helpers/.
+        let tmp = make_bundle(&[
+            "Google Chrome Framework.framework/Versions/139.0.7258.67/Helpers/Google Chrome Helper (Renderer).app",
+        ]);
+        assert!(bundle_signals_chromium(tmp.path()));
+    }
+
+    #[test]
+    fn test_bundle_signals_chromium_rejects_native_app() {
+        // Typical AppKit app: frameworks, but no Chromium signature.
+        let tmp = make_bundle(&["Sparkle.framework", "Sentry.framework"]);
+        assert!(!bundle_signals_chromium(tmp.path()));
+    }
+
+    #[test]
+    fn test_bundle_signals_chromium_rejects_non_renderer_helper() {
+        // Only the (Renderer) helper marks the family — an unrelated helper
+        // or a helper-free framework must not.
+        let tmp = make_bundle(&[
+            "Foo Helper (GPU).app",
+            "Foo Helper.app",
+            "Foo.framework/Versions/A/Helpers/Foo Helper (GPU).app",
+        ]);
+        assert!(!bundle_signals_chromium(tmp.path()));
+    }
+
+    #[test]
+    fn test_bundle_signals_chromium_default_safe_on_missing_dirs() {
+        // No Frameworks dir at all, and a root that doesn't exist → false.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!bundle_signals_chromium(tmp.path()));
+        assert!(!bundle_signals_chromium(&tmp.path().join("no-such.app")));
+    }
+
+    #[test]
+    fn test_enhanced_mode_denied_outlook_by_name() {
+        assert!(is_enhanced_mode_denied("microsoft outlook", None));
+        assert!(is_enhanced_mode_denied(
+            "outlook",
+            Some("com.microsoft.Outlook")
+        ));
+    }
+
+    #[test]
+    fn test_enhanced_mode_denied_microsoft_bundles_except_edge() {
+        // Any Microsoft bundle id is denied (compared case-insensitively —
+        // Outlook ships as "com.microsoft.Outlook")…
+        assert!(is_enhanced_mode_denied(
+            "teams",
+            Some("com.microsoft.teams2")
+        ));
+        assert!(is_enhanced_mode_denied("word", Some("com.microsoft.Word")));
+        // …except Edge, the one Microsoft Chromium browser we must poke.
+        assert!(!is_enhanced_mode_denied(
+            "microsoft edge",
+            Some("com.microsoft.edgemac")
+        ));
+    }
+
+    #[test]
+    fn test_enhanced_mode_not_denied_for_ordinary_chromium_apps() {
+        assert!(!is_enhanced_mode_denied(
+            "google chrome",
+            Some("com.google.Chrome")
+        ));
+        assert!(!is_enhanced_mode_denied(
+            "slack",
+            Some("com.tinyspeck.slackmacgap")
+        ));
+        assert!(!is_enhanced_mode_denied("obsidian", None));
     }
 }
