@@ -1,0 +1,46 @@
+# LegalTime fork automation: keep this fork current with upstream while
+# carrying the LegalTime engine patches on the `legaltime` branch.
+#
+#   - `main` is a pristine mirror of screenpipe/screenpipe main
+#     (fast-forward pushes only; a failed mirror push means upstream
+#     rewrote history and wants human eyes).
+#   - `legaltime` (default branch) = main + LegalTime patches. Upstream
+#     lands here via merge commits — never rebase — so the patch history
+#     stays stable across syncs.
+#   - A merge conflict fails the run loudly: fix it locally (merge
+#     upstream/main into legaltime, resolve, push) and re-run.
+#
+# This file lives only on `legaltime`; scheduled workflows run from the
+# default branch, which is why `legaltime` must stay the default.
+
+name: legaltime-upstream-sync
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: legaltime
+          fetch-depth: 0
+
+      - name: Mirror upstream main
+        run: |
+          git remote add upstream https://github.com/screenpipe/screenpipe.git
+          git fetch upstream main
+          git push origin upstream/main:refs/heads/main
+
+      - name: Merge upstream into legaltime
+        run: |
+          git config user.name "legaltime-bot"
+          git config user.email "engineering@legaltime.ai"
+          git merge --no-edit upstream/main
+          git push origin legaltime
