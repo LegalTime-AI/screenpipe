@@ -1,0 +1,488 @@
+# LegalTime fork CLI release
+#
+# Builds the screenpipe CLI from this fork's `legaltime` branch and attaches
+# per-platform tarballs to a GitHub Release, so the LegalTime desktop app can
+# fetch the capture engine from this fork instead of the upstream npm registry.
+#
+# ── Asset-name contract with the desktop ────────────────────────────────────
+# The desktop (legaltime-ai src/main/capture-engine.ts, getCaptureNpmTarballUrl)
+# today downloads:
+#   https://registry.npmjs.org/@screenpipe/cli-<npmTarget>/-/cli-<npmTarget>-<version>.tgz
+# with npmTarget ∈ {darwin-arm64, darwin-x64, win32-x64, linux-x64}. This
+# workflow publishes assets named exactly `cli-<npmTarget>-<version>.tgz` on a
+# release tagged `legaltime-v<version>`, so the desktop only swaps the URL base:
+#   https://github.com/LegalTime-AI/screenpipe/releases/download/legaltime-v<version>/cli-<npmTarget>-<version>.tgz
+#
+# ── Tarball layout contract ──────────────────────────────────────────────────
+# Each tarball must match the npm package layout byte-for-byte in structure:
+#   package/bin/<screenpipe|screenpipe.exe>   ← the CLI binary
+#   package/bin/<companion files>             ← mlx.metallib (darwin-arm64);
+#                                               onnxruntime.dll, libopenblas.dll,
+#                                               vcruntime140.dll, vcruntime140_1.dll,
+#                                               msvcp140.dll (win32-x64)
+#   package/package.json, package/LICENSE.md  ← npm metadata
+# We guarantee this by staging into the repo's own npm platform-package dirs
+# (packages/cli/screenpipe-<npmTarget>/) and running `npm pack` — the same
+# layout upstream's publish-npm job ships (.github/workflows/release-cli.yml:666-739).
+#
+# ── Version stamping (CRITICAL) ──────────────────────────────────────────────
+# The binary's `--version` output MUST print exactly the release version, pure
+# dotted numerics (e.g. 0.5.1 — NO -rc/-beta suffix). The desktop runs
+# `<binary> --version`, extracts /(\d+\.\d+\.\d+)/, and compares dotted numbers
+# only; it refuses to swap in a binary whose version isn't strictly newer than
+# what it has (currently pinned 0.4.25), so a wrong or suffixed version bricks
+# the update path. The CLI's version comes from clap's `version` attribute
+# (crates/screenpipe-engine/src/cli/mod.rs:160) → CARGO_PKG_VERSION →
+# [workspace.package] version in the root Cargo.toml. Upstream keeps these in
+# sync by committing a Cargo.toml bump before tagging ("Bump CLI to vX.Y.Z");
+# we stamp the same field in-workflow so a fork tag alone suffices, then assert
+# the built binary actually prints the expected version before packaging.
+#
+# ── Signing ──────────────────────────────────────────────────────────────────
+# Code signing/notarization (macOS) and Authenticode (Windows) are deliberately
+# omitted: the binary is signed as part of the LegalTime desktop app bundle at
+# package time, and runtime engine updates are written by the app itself so
+# they carry no quarantine xattr.
+#
+# ── Targets ──────────────────────────────────────────────────────────────────
+# Built now: aarch64-apple-darwin (macos-latest), x86_64-pc-windows-msvc
+# (windows-latest). darwin-x64 and linux-x64 are skipped for now — see the
+# commented-out matrix entry / job stub below for what re-enabling them takes.
+#
+# Fork-irrelevant upstream steps intentionally dropped (vs release-cli.yml):
+# sccache/R2 (setup-rust-toolchain's built-in cache instead), Sentry symbol
+# upload, codesign/notarize/eSigner, npm publish, the wget install (nothing in
+# the CLI build uses it), the 7-Zip installer (preinstalled on windows-latest;
+# verified below), and the Homebrew package cache.
+
+name: LegalTime Release CLI
+
+on:
+  push:
+    tags:
+      - "legaltime-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, pure dotted numerics (e.g. 0.5.1). Must be > the desktop's current engine version or it refuses the swap."
+        required: true
+        type: string
+
+concurrency:
+  # Serialize releases — aborting a release mid-flight is worse than waiting.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  GIT_LFS_SKIP_SMUDGE: 1
+
+jobs:
+  # Resolve + validate the release version once; every other job consumes it.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${GITHUB_REF#refs/tags/legaltime-v}"
+          fi
+          # Strict X.Y.Z: the desktop's comparator Number()s each dot segment,
+          # so any suffix (0.5.1-rc1) parses as NaN and breaks the update path.
+          # npm version (used for packaging below) also requires exact semver.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version '$VERSION' must be pure dotted numerics (X.Y.Z, no prerelease suffix)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION"
+
+  build-macos:
+    needs: version
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            npm_target: darwin-arm64
+          # darwin-x64 skipped for now. Re-enabling needs macos-15-intel
+          # (macos-13 retired), the non-MLX feature set, and the
+          # libonnxruntime.dylib staging from release-cli.yml:228-239:
+          # - target: x86_64-apple-darwin
+          #   npm_target: darwin-x64
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Same action upstream uses (release-cli.yml:76-83); its built-in cache
+      # (Swatinem/rust-cache) covers ~/.cargo + target/, replacing upstream's
+      # sccache/R2 setup and manual actions/cache blocks.
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          cache: true
+          target: ${{ matrix.target }}
+          rustflags: ""
+
+      # Verbatim from release-cli.yml:107-111.
+      - name: Install dependencies
+        run: |
+          brew unlink pkg-config@0.29.2 || true
+          brew install ffmpeg pkg-config
+          brew link --overwrite pkg-config
+
+      # See "Version stamping" in the header. Targets the [workspace.package]
+      # version line specifically (Cargo.toml:14-15), not any dependency pin.
+      - name: Stamp release version into Cargo workspace
+        run: |
+          perl -0777 -pi -e 's/(\[workspace\.package\]\nversion = ")[^"]+(")/${1}$ENV{VERSION}${2}/' Cargo.toml
+          STAMPED=$(sed -n '/^\[workspace\.package\]/{n;p;}' Cargo.toml)
+          echo "Stamped: $STAMPED"
+          if [[ "$STAMPED" != "version = \"$VERSION\"" ]]; then
+            echo "::error::failed to stamp version into Cargo.toml [workspace.package]"
+            exit 1
+          fi
+
+      # Build invocation verbatim from release-cli.yml:122-133 (aarch64 branch):
+      # -p screenpipe-engine --bin screenpipe, Metal + MLX + CoreML-redact
+      # features, i8mm/M1 CFLAGS workaround, @executable_path rpath.
+      - name: Build with Metal feature
+        run: |
+          export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export RUSTFLAGS="-C link-arg=-Wl,-rpath,@executable_path/../lib -C link-arg=-Wl,-rpath,@loader_path/../lib"
+          # Fix i8mm build error - force M1 compatible architecture
+          # -U__ARM_FEATURE_MATMUL_INT8 undefines i8mm macro
+          # See: https://github.com/ggml-org/whisper.cpp/issues/3427
+          export CFLAGS="-mcpu=apple-m1 -U__ARM_FEATURE_MATMUL_INT8"
+          export CXXFLAGS="-mcpu=apple-m1 -U__ARM_FEATURE_MATMUL_INT8"
+          cargo build --release -p screenpipe-engine --bin screenpipe --features metal,parakeet-mlx,rfdetr-mlx,redact-onnx-coreml --target ${{ matrix.target }}
+
+      # Stage into the repo's own npm platform-package dir so `npm pack`
+      # reproduces the exact published layout (package/bin/... + package.json
+      # + LICENSE.md), mirroring publish-npm (release-cli.yml:669-679, 696-703).
+      - name: Stage package contents
+        run: |
+          PKG_DIR="packages/cli/screenpipe-${{ matrix.npm_target }}"
+          mkdir -p "$PKG_DIR/bin"
+          cp "target/${{ matrix.target }}/release/screenpipe" "$PKG_DIR/bin/"
+          chmod +x "$PKG_DIR/bin/screenpipe"
+          # mlx.metallib must sit next to the binary (MLX searches there at
+          # runtime; CI cmake builds in JIT mode so it isn't compiled here).
+          # Upstream downloads the prebuilt from its own public release
+          # (release-cli.yml:214-222) — same source, but we hard-fail instead
+          # of upstream's warn-and-continue: a tarball silently missing the
+          # metallib would ship a Metal-less engine to every Mac.
+          curl -L -f -o "$PKG_DIR/bin/mlx.metallib" \
+            "https://github.com/screenpipe/screenpipe/releases/download/mlx-metallib-v0.2.0/mlx.metallib"
+          test -s "$PKG_DIR/bin/mlx.metallib"
+          cp LICENSE.md "$PKG_DIR/LICENSE.md"
+
+      # Enforce the version contract before packaging: parse --version output
+      # exactly the way the desktop does (first \d+.\d+.\d+ match).
+      - name: Verify binary --version
+        run: |
+          OUT=$("packages/cli/screenpipe-${{ matrix.npm_target }}/bin/screenpipe" --version)
+          echo "--version output: $OUT"
+          GOT=$(echo "$OUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [[ "$GOT" != "$VERSION" ]]; then
+            echo "::error::binary reports '$GOT', expected '$VERSION' — version stamp did not reach the build"
+            exit 1
+          fi
+
+      - name: Pack tarball (npm layout)
+        run: |
+          PKG_DIR="packages/cli/screenpipe-${{ matrix.npm_target }}"
+          cd "$PKG_DIR"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npm pack
+          # npm names scoped tarballs screenpipe-cli-<t>-<v>.tgz; the desktop
+          # contract is cli-<t>-<v>.tgz (matches the registry tarball basename).
+          mv "screenpipe-cli-${{ matrix.npm_target }}-$VERSION.tgz" \
+             "$GITHUB_WORKSPACE/cli-${{ matrix.npm_target }}-$VERSION.tgz"
+          cd "$GITHUB_WORKSPACE"
+          tar -tzf "cli-${{ matrix.npm_target }}-$VERSION.tgz" | sort
+          for f in package/bin/screenpipe package/bin/mlx.metallib package/package.json; do
+            tar -tzf "cli-${{ matrix.npm_target }}-$VERSION.tgz" | grep -qx "$f" \
+              || { echo "::error::tarball missing $f"; exit 1; }
+          done
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.npm_target }}
+          path: cli-${{ matrix.npm_target }}-*.tgz
+          if-no-files-found: error
+
+  build-windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Upstream installs rustup by hand (release-cli.yml:261-264); we use the
+      # same toolchain action as the macOS job for its built-in cache.
+      # cache-targets off: the MAX_PATH junction step below deletes target/
+      # right after any restore, so caching it is pure churn — only the
+      # registry/git caches pay off here (upstream had no target cache either).
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          cache: true
+          cache-targets: false
+          target: x86_64-pc-windows-msvc
+          rustflags: ""
+
+      # windows-latest images ship 7-Zip at C:\Program Files\7-Zip, which is
+      # exactly where setup_openblas.js's find7z() looks — so upstream's
+      # installer step (release-cli.yml:266-277) is replaced by a hard check.
+      - name: Verify 7-Zip
+        shell: pwsh
+        run: |
+          if (!(Test-Path "C:\Program Files\7-Zip\7z.exe")) {
+            Write-Host "::error::7-Zip not preinstalled on runner; restore upstream's install step (release-cli.yml:266-277)"
+            exit 1
+          }
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Verbatim from release-cli.yml:303-314 (only change: explicit 7z path).
+      # ort links via download-binaries (see Build CLI env comment), but this
+      # staged zip is the fallback source of the runtime onnxruntime.dll that
+      # ships in the package.
+      - name: Download ONNX Runtime (CPU)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip"
+          $zipFile = "onnxruntime-win-x64-1.24.2.zip"
+          $extractDir = "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2"
+          Invoke-WebRequest -Uri $url -OutFile $zipFile
+          if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+          & "C:\Program Files\7-Zip\7z.exe" x $zipFile -o"apps/screenpipe-app-tauri/src-tauri/" -y
+          Write-Host "ONNX Runtime extracted to $extractDir"
+          Get-ChildItem "$extractDir/lib" | ForEach-Object { Write-Host $_.Name }
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      # Verbatim from release-cli.yml:330-335. Downloads OpenBLAS-0.3.31 and
+      # flattens it to src-tauri/openblas (bin/libopenblas.dll for the package,
+      # lib/libopenblas.lib for the link) — see scripts/setup_openblas.js.
+      - name: Setup OpenBLAS
+        shell: pwsh
+        run: |
+          cd apps/screenpipe-app-tauri
+          bun scripts/setup_openblas.js
+          "OPENBLAS_PATH=${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/openblas" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # Verbatim from release-cli.yml:337-346.
+      - name: Shorten target dir to avoid MAX_PATH
+        shell: pwsh
+        run: |
+          $targetDir = "target"
+          $shortDir = "C:\t"
+          if (Test-Path $shortDir) { Remove-Item -Recurse -Force $shortDir }
+          New-Item -ItemType Directory -Force -Path $shortDir | Out-Null
+          if (Test-Path $targetDir) { Remove-Item -Recurse -Force $targetDir }
+          cmd /c mklink /J $targetDir $shortDir
+          Write-Host "Created junction: $targetDir -> $shortDir"
+
+      # See "Version stamping" in the header — pwsh twin of the macOS step.
+      - name: Stamp release version into Cargo workspace
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:GITHUB_WORKSPACE "Cargo.toml"
+          $raw = [IO.File]::ReadAllText($path)
+          $pattern = '(\[workspace\.package\]\r?\nversion = ")[^"]+(")'
+          $replacement = '${1}' + $env:VERSION + '${2}'
+          $stamped = [regex]::Replace($raw, $pattern, $replacement)
+          [IO.File]::WriteAllText($path, $stamped)
+          $check = '\[workspace\.package\]\r?\nversion = "' + [regex]::Escape($env:VERSION) + '"'
+          if ($stamped -notmatch $check) {
+            Write-Host "::error::failed to stamp version into Cargo.toml [workspace.package]"
+            exit 1
+          }
+          Write-Host "Stamped workspace version: $env:VERSION"
+
+      # Env block + invocation verbatim from release-cli.yml:348-376.
+      - name: Build CLI
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: "none"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
+          CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+          # LTCG removed: MSVC LTCG ignores /arch:AVX2 and can emit AVX-512 on Xeon CI runners
+          # causing STATUS_ILLEGAL_INSTRUCTION on consumer CPUs (Arrow Lake, Panther Lake, Lunar Lake)
+          RUSTFLAGS: ""
+          CFLAGS: "/arch:AVX2"
+          CXXFLAGS: "/arch:AVX2"
+          # whisper-rs build.rs passes GGML_* env vars as cmake defines.
+          # CMAKE_ARGS string was ignored — these individual vars actually work.
+          GGML_NATIVE: "OFF"
+          GGML_AVX512: "OFF"
+          GGML_AVX512_VBMI: "OFF"
+          GGML_AVX512_VNNI: "OFF"
+          GGML_AVX512_BF16: "OFF"
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF -DCMAKE_C_FLAGS=/arch:AVX2 -DCMAKE_CXX_FLAGS=/arch:AVX2"
+          # Link ONNX Runtime via ort's download-binaries (pyke prebuilt). Setting
+          # ORT_LIB_LOCATION forces ort-sys into system static-linking, which needs
+          # onnxruntime_common.lib + the static _deps tree the dynamic MS prebuilt
+          # doesn't ship -> "ort-sys could not link". The MS zip staged above still
+          # provides the runtime DLL.
+          OPENBLAS_PATH: ${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/openblas
+          # Use prebuilt NASM objects on Windows: https://aws.github.io/aws-lc-rs/requirements/windows.html#prebuilt-nasm-objects
+          AWS_LC_SYS_PREBUILT_NASM: "1"
+        run: |
+          cargo build --release -p screenpipe-engine --bin screenpipe --features directml,redact-onnx-directml --target x86_64-pc-windows-msvc
+
+      # DLL staging mirrors release-cli.yml:444-481 (onnxruntime fallback chain,
+      # OpenBLAS DLLs, hard-failing VC++ runtime trio), staged straight into the
+      # npm platform-package dir like publish-npm does (release-cli.yml:692-694).
+      - name: Stage package contents
+        shell: pwsh
+        run: |
+          $pkgDir = "packages/cli/screenpipe-win32-x64"
+          New-Item -Path "$pkgDir/bin" -ItemType Directory -Force
+          Copy-Item "target/x86_64-pc-windows-msvc/release/screenpipe.exe" "$pkgDir/bin/"
+          # Copy onnxruntime.dll - try target dir first (ort copy-dylibs), fallback to staged MS zip
+          $ortDll = "target/x86_64-pc-windows-msvc/release/onnxruntime.dll"
+          if (!(Test-Path $ortDll)) {
+            $ortDll = "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll"
+          }
+          Copy-Item $ortDll "$pkgDir/bin/"
+          # OpenBLAS DLL(s) for qwen3-asr (libopenblas.dll)
+          $openblasBin = "apps/screenpipe-app-tauri/src-tauri/openblas/bin"
+          if (Test-Path $openblasBin) {
+            Copy-Item "$openblasBin/*.dll" "$pkgDir/bin/" -Force
+          }
+          # VC++ runtime DLLs required by onnxruntime.dll (dynamic CRT). A missing
+          # one causes STATUS_DLL_INIT_FAILED (0xC0000142) on machines without the
+          # VC++ redistributable, so hard-fail rather than ship incomplete.
+          $vcDlls = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')
+          foreach ($dll in $vcDlls) {
+            $src = "C:\Windows\System32\$dll"
+            if (!(Test-Path $src)) {
+              Write-Host "::error::required VC++ runtime DLL not found on runner: $src"
+              exit 1
+            }
+            Copy-Item $src "$pkgDir/bin/" -Force
+          }
+          # Assert the full companion set (stricter than upstream, which is
+          # lenient about OpenBLAS): the desktop copies every DLL next to the
+          # binary, and a missing one only surfaces on a customer machine.
+          foreach ($f in @('screenpipe.exe', 'onnxruntime.dll') + $vcDlls) {
+            if (!(Test-Path "$pkgDir/bin/$f")) {
+              Write-Host "::error::$f missing from package bin/ after staging"
+              exit 1
+            }
+          }
+          if (!(Get-ChildItem "$pkgDir/bin" -Filter "*openblas*.dll")) {
+            Write-Host "::error::no OpenBLAS DLL staged into package bin/"
+            exit 1
+          }
+          Copy-Item "LICENSE.md" "$pkgDir/LICENSE.md"
+          Get-ChildItem "$pkgDir/bin"
+
+      # Enforce the version contract before packaging: parse --version output
+      # exactly the way the desktop does (first \d+.\d+.\d+ match). Running from
+      # the staged bin/ also smoke-tests that the DLL set actually loads.
+      - name: Verify binary --version
+        shell: pwsh
+        run: |
+          $exe = "packages/cli/screenpipe-win32-x64/bin/screenpipe.exe"
+          $out = (& $exe --version | Out-String).Trim()
+          Write-Host "--version output: $out"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::--version exited with $LASTEXITCODE"
+            exit 1
+          }
+          if ($out -notmatch '(\d+\.\d+\.\d+)') {
+            Write-Host "::error::could not parse a version from output"
+            exit 1
+          }
+          if ($Matches[1] -ne $env:VERSION) {
+            Write-Host "::error::binary reports '$($Matches[1])', expected '$env:VERSION' — version stamp did not reach the build"
+            exit 1
+          }
+
+      - name: Pack tarball (npm layout)
+        shell: pwsh
+        run: |
+          $pkgDir = "packages/cli/screenpipe-win32-x64"
+          Push-Location $pkgDir
+          npm version $env:VERSION --no-git-tag-version --allow-same-version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          npm pack
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Move-Item "screenpipe-cli-win32-x64-$env:VERSION.tgz" "$env:GITHUB_WORKSPACE\cli-win32-x64-$env:VERSION.tgz"
+          Pop-Location
+          $entries = tar -tzf "cli-win32-x64-$env:VERSION.tgz"
+          $entries | Sort-Object | ForEach-Object { Write-Host $_ }
+          foreach ($f in @('package/bin/screenpipe.exe', 'package/bin/onnxruntime.dll', 'package/bin/vcruntime140.dll', 'package/package.json')) {
+            if ($entries -notcontains $f) {
+              Write-Host "::error::tarball missing $f"
+              exit 1
+            }
+          }
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-win32-x64
+          path: cli-win32-x64-*.tgz
+          if-no-files-found: error
+
+  # linux-x64 skipped for now. Re-enabling = a build-linux job mirroring
+  # release-cli.yml:495-624 (apt deps + OpenBLAS symlink shim, redact-onnx-cpu
+  # feature, bundled static tesseract + tessdata) staged into
+  # packages/cli/screenpipe-linux-x64 and packed like the jobs above.
+
+  # Single release job = no cross-job upload race: both builds land as
+  # artifacts first, then one job attaches everything to one release.
+  release:
+    needs: [version, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -R artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: legaltime-v${{ needs.version.outputs.version }}
+          name: LegalTime CLI v${{ needs.version.outputs.version }}
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: artifacts/**/cli-*.tgz
+          body: |
+            LegalTime fork build of the screenpipe CLI (capture engine).
+
+            Assets follow the desktop's tarball contract: `cli-<npmTarget>-<version>.tgz`
+            unpacking to `package/bin/<binary>` + companion files, identical to the
+            `@screenpipe/cli-<npmTarget>` npm package layout. The binary's `--version`
+            prints exactly `${{ needs.version.outputs.version }}`.
+
+            Unsigned by design: the engine is signed inside the LegalTime desktop
+            app bundle at package time.
