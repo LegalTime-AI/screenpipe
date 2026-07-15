@@ -91,6 +91,22 @@ pub struct UiCaptureConfig {
     /// Apps to exclude from capture (case-insensitive substring match)
     pub excluded_apps: Vec<String>,
 
+    /// Apps the engine must never touch via UI Automation (case-insensitive
+    /// substring match on the process/app name).
+    ///
+    /// Any UIA call that reaches an app's windows — ElementFromHandle,
+    /// ElementFromPoint, GetFocusedElement, tree walks, or event
+    /// subscriptions — makes that app's provider observe an active
+    /// accessibility client (`UiaClientsAreListening()` flips to TRUE).
+    /// Microsoft Office keys assistive-technology behavior on that flag:
+    /// classic Outlook (OUTLOOK.EXE) switches its To:-field autocomplete
+    /// into screen-reader mode and auto-commits the first suggestion while
+    /// a UIA client is present. Apps listed here are exempt from every UIA
+    /// read; vision/OCR capture continues unaffected. The default matches
+    /// OUTLOOK.EXE but not olk.exe (new Outlook, which is unaffected).
+    #[serde(default = "default_uia_passive_apps")]
+    pub uia_passive_apps: Vec<String>,
+
     /// Cached lowercase parse of `excluded_apps`.
     /// Populated by `compile_patterns()` for hot-path app filtering.
     #[serde(skip)]
@@ -159,6 +175,28 @@ pub struct UiCaptureConfig {
     /// Captures right after input are typically stale within ms anyway, so skipping
     /// costs little signal while yielding CPU to input threads.
     pub pause_extraction_on_input_ms: u64,
+}
+
+/// Default UIA-passive app list — classic Outlook (see
+/// [`UiCaptureConfig::uia_passive_apps`]). Substring match, so "outlook"
+/// covers `OUTLOOK.EXE` in any casing without matching `olk.exe`.
+fn default_uia_passive_apps() -> Vec<String> {
+    vec!["outlook".to_string()]
+}
+
+/// Case-insensitive substring match of an app/process name against a
+/// UIA-passive app list. Shared by [`UiCaptureConfig::is_uia_passive`] and
+/// `TreeWalkerConfig::is_uia_passive` so both capture paths agree on what
+/// "passive" means. Empty patterns are ignored (they would match everything).
+pub fn app_matches_uia_passive(passive_apps: &[String], app_name: &str) -> bool {
+    if app_name.is_empty() {
+        return false;
+    }
+    let app_lower = app_name.to_lowercase();
+    passive_apps
+        .iter()
+        .filter(|p| !p.is_empty())
+        .any(|p| app_lower.contains(&p.to_lowercase()))
 }
 
 /// OS thread priority for a11y extraction threads.
@@ -234,6 +272,7 @@ impl Default for UiCaptureConfig {
                 "Keychain Access".to_string(),
                 "Credential Manager".to_string(),
             ],
+            uia_passive_apps: default_uia_passive_apps(),
             excluded_app_patterns: Vec::new(),
             excluded_window_patterns: Vec::new(),
             // Incognito / private browsing detection is handled by the
@@ -391,6 +430,13 @@ impl UiCaptureConfig {
         }
 
         window_pattern::passes_includes(&self.resolved_included(), &app_lower, &title_lower)
+    }
+
+    /// True when `app_name` is UIA-passive: no UI Automation call may touch
+    /// this app's windows (the app would detect an assistive-technology
+    /// client and change behavior). See [`Self::uia_passive_apps`].
+    pub fn is_uia_passive(&self, app_name: &str) -> bool {
+        app_matches_uia_passive(&self.uia_passive_apps, app_name)
     }
 
     /// Check if element appears to be a password field
@@ -588,6 +634,47 @@ mod tests {
                 title
             );
         }
+    }
+
+    #[test]
+    fn test_uia_passive_default_matches_classic_outlook_only() {
+        let config = UiCaptureConfig::new();
+        // Default list is ["outlook"] — must catch classic Outlook's process
+        // name in any casing (szExeFile yields "OUTLOOK.EXE").
+        assert_eq!(config.uia_passive_apps, vec!["outlook".to_string()]);
+        assert!(config.is_uia_passive("OUTLOOK.EXE"));
+        assert!(config.is_uia_passive("outlook.exe"));
+        assert!(config.is_uia_passive("Outlook"));
+
+        // Must NOT match the "new" Outlook (olk.exe, WebView2 — unaffected)
+        // or unrelated apps.
+        assert!(!config.is_uia_passive("olk.exe"));
+        assert!(!config.is_uia_passive("chrome.exe"));
+        assert!(!config.is_uia_passive("notepad.exe"));
+        assert!(!config.is_uia_passive(""));
+    }
+
+    #[test]
+    fn test_uia_passive_user_configured_list() {
+        let mut config = UiCaptureConfig::new();
+        config.uia_passive_apps = vec!["outlook".to_string(), "MyLegacyApp".to_string()];
+        assert!(config.is_uia_passive("mylegacyapp.exe"));
+        assert!(config.is_uia_passive("OUTLOOK.EXE"));
+        assert!(!config.is_uia_passive("other.exe"));
+
+        // Emptying the list disables the exemption entirely.
+        config.uia_passive_apps.clear();
+        assert!(!config.is_uia_passive("OUTLOOK.EXE"));
+    }
+
+    #[test]
+    fn test_uia_passive_ignores_empty_patterns() {
+        // An empty pattern would substring-match every app — must be ignored.
+        assert!(!app_matches_uia_passive(&["".to_string()], "chrome.exe"));
+        assert!(app_matches_uia_passive(
+            &["".to_string(), "outlook".to_string()],
+            "OUTLOOK.EXE"
+        ));
     }
 
     #[test]

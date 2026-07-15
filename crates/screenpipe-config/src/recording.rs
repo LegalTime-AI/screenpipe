@@ -409,6 +409,16 @@ pub struct RecordingSettings {
     #[serde(rename = "ignoredUrls", default)]
     pub ignored_urls: Vec<String>,
 
+    /// Apps the engine must never touch via UI Automation (Windows). Any UIA
+    /// read of their windows would make them detect an assistive-technology
+    /// client and change behavior — e.g. classic Outlook auto-selects the
+    /// first To:-field autocomplete suggestion while a UIA client is present.
+    /// Vision/OCR capture continues; only accessibility-tree reads are
+    /// skipped. Case-insensitive substring match on the process name.
+    /// Default: ["outlook"] (matches OUTLOOK.EXE, not olk.exe / new Outlook).
+    #[serde(rename = "uiaPassiveApps", default = "default_uia_passive_apps")]
+    pub uia_passive_apps: Vec<String>,
+
     /// Automatically detect and skip incognito / private browsing windows.
     #[serde(rename = "ignoreIncognitoWindows")]
     pub ignore_incognito_windows: bool,
@@ -750,6 +760,7 @@ impl Default for RecordingSettings {
             ignored_windows: vec![],
             included_windows: vec![],
             ignored_urls: vec![],
+            uia_passive_apps: default_uia_passive_apps(),
             ignore_incognito_windows: true,
             pause_on_drm_content: false,
             disable_clipboard_capture: true,
@@ -829,6 +840,12 @@ fn default_extraction_thread_priority() -> String {
 
 fn default_pause_extraction_on_input_ms() -> u64 {
     150
+}
+
+/// Default UIA-passive list: classic Outlook. Substring match, so "outlook"
+/// covers OUTLOOK.EXE in any casing without matching olk.exe (new Outlook).
+fn default_uia_passive_apps() -> Vec<String> {
+    vec!["outlook".to_string()]
 }
 
 fn default_pii_backend() -> String {

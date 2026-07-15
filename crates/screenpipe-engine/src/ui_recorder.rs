@@ -188,6 +188,13 @@ pub struct UiRecorderConfig {
     pub ignored_windows: Vec<String>,
     /// User-configured included windows (whitelist for tree walker)
     pub included_windows: Vec<String>,
+    /// Apps the engine must never touch via UI Automation (Windows). Any UIA
+    /// read of their windows would make them observe an assistive-technology
+    /// client and change behavior — e.g. classic Outlook auto-commits the
+    /// first To:-field autocomplete suggestion while a UIA client is present.
+    /// Case-insensitive substring match on the process name. Maps to
+    /// `UiCaptureConfig.uia_passive_apps`.
+    pub uia_passive_apps: Vec<String>,
     /// Batch size for database inserts
     pub batch_size: usize,
     /// Batch timeout in milliseconds
@@ -244,6 +251,9 @@ impl Default for UiRecorderConfig {
             excluded_windows: Vec::new(),
             ignored_windows: Vec::new(),
             included_windows: Vec::new(),
+            // Keep in sync with `UiCaptureConfig`'s default ("outlook" —
+            // matches OUTLOOK.EXE, not olk.exe / new Outlook).
+            uia_passive_apps: vec!["outlook".to_string()],
             batch_size: 100,
             batch_timeout_ms: 1000,
             enable_tree_walker: true,
@@ -291,6 +301,7 @@ impl UiRecorderConfig {
         config.excluded_window_pattern_strings = self.excluded_windows.clone();
         config.ignored_windows = self.ignored_windows.clone();
         config.included_windows = self.included_windows.clone();
+        config.uia_passive_apps = self.uia_passive_apps.clone();
         config.compile_patterns();
 
         config

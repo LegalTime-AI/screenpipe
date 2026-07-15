@@ -186,10 +186,9 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         let start = Instant::now();
 
-        // Safety: single-threaded access guaranteed by walker thread design
-        let uia = unsafe { self.ensure_init()? };
-
-        // Get the focused window
+        // Get the focused window. Everything up to `ensure_init()` below is
+        // pure Win32 — no COM/UIA — so filtered and UIA-passive windows are
+        // resolved without ever creating a UIA client.
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd == HWND::default() {
             return Ok(TreeWalkResult::NotFound);
@@ -213,15 +212,6 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         let app_lower = app_name.to_lowercase();
         if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
             debug!(app = %app_name, pid, "a11y: skipped — hardcoded excluded app");
-            return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
-        }
-
-        // Skip apps whose in-process UIA providers crash the host process when an
-        // external client materializes their full subtree (Outlook Classic on Sent
-        // Items) — same exemption as the periodic worker path. OCR still captures
-        // the on-screen content for these apps.
-        if crate::platform::windows_uia::is_fragile_uia_tree_provider(&app_name) {
-            debug!(app = %app_name, pid, "a11y: skipped — fragile UIA tree provider (crash-prone)");
             return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
         }
 
@@ -273,7 +263,44 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
         }
 
+        // UIA-passive apps (default: classic Outlook): never make ANY UIA
+        // call that touches their windows — a cross-process UIA read flips
+        // `UiaClientsAreListening()` in the target process, and Office keys
+        // assistive-technology behavior on it (Outlook auto-commits the
+        // first To:-field autocomplete suggestion while a UIA client is
+        // present). Deliberately NOT `Skipped(_)` — the paired-capture
+        // caller aborts the whole capture on Skipped (no screenshot, no
+        // OCR). An empty `Found` snapshot keeps the Win32 app/window
+        // metadata and, with `text_content` empty, makes
+        // `has_accessibility_text` false so the existing OCR fallback runs.
+        if self.config.is_uia_passive(&app_name) {
+            debug!(app = %app_name, pid, "a11y: UIA-passive app — Win32 metadata only, OCR fallback");
+            return Ok(TreeWalkResult::Found(passive_snapshot(
+                hwnd,
+                app_name,
+                window_name,
+                &self.config,
+                start,
+            )));
+        }
+
+        // Skip apps whose in-process UIA providers crash the host process when an
+        // external client materializes their full subtree (Outlook Classic on Sent
+        // Items) — same exemption as the periodic worker path. Checked AFTER the
+        // UIA-passive exemption: passive apps take the empty-Found path above
+        // (screenshot + OCR keep working); this Skipped fallback only fires if a
+        // fragile app was removed from the passive list, keeping crash protection.
+        if crate::platform::windows_uia::is_fragile_uia_tree_provider(&app_name) {
+            debug!(app = %app_name, pid, "a11y: skipped — fragile UIA tree provider (crash-prone)");
+            return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
+        }
+
         debug!(app = %app_name, pid, title = %window_name, "a11y: capturing window tree");
+
+        // Safety: single-threaded access guaranteed by walker thread design.
+        // Deliberately after every pure-Win32 filter above so no COM/UIA
+        // machinery is created for windows we won't walk.
+        let uia = unsafe { self.ensure_init()? };
 
         // Use adaptive budget overrides when set
         let effective_timeout = self.config.effective_walk_timeout();
@@ -408,6 +435,53 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             max_depth_reached: 0,
             window_bounds,
         }))
+    }
+}
+
+/// Build the empty snapshot returned for UIA-passive apps: app/window
+/// metadata and window bounds resolved purely via Win32 (GetWindowRect /
+/// MonitorFromWindow — no UIA), zero nodes and empty text. The empty
+/// `text_content` is what routes paired capture to its OCR fallback, and the
+/// window bounds keep the OCR window-crop optimization working.
+fn passive_snapshot(
+    hwnd: HWND,
+    app_name: String,
+    window_name: String,
+    config: &TreeWalkerConfig,
+    start: Instant,
+) -> TreeSnapshot {
+    let monitor_rect = get_monitor_rect(hwnd);
+    let window_rect = get_window_rect(hwnd);
+    let window_bounds = match (&window_rect, &monitor_rect) {
+        (Some(w), Some(m))
+            if m.width > 0.0 && m.height > 0.0 && monitor_matches_config(m, config) =>
+        {
+            Some(super::WindowBounds {
+                x: (w.x - m.x) / m.width,
+                y: (w.y - m.y) / m.height,
+                width: w.width / m.width,
+                height: w.height / m.height,
+            })
+        }
+        _ => None,
+    };
+
+    TreeSnapshot {
+        app_name,
+        window_name,
+        text_content: String::new(),
+        nodes: Vec::new(),
+        browser_url: None,
+        document_path: None,
+        timestamp: Utc::now(),
+        node_count: 0,
+        walk_duration: start.elapsed(),
+        content_hash: TreeSnapshot::compute_hash(""),
+        simhash: TreeSnapshot::compute_simhash(""),
+        truncated: false,
+        truncation_reason: super::TruncationReason::None,
+        max_depth_reached: 0,
+        window_bounds,
     }
 }
 

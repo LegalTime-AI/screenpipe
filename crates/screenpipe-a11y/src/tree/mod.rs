@@ -444,6 +444,16 @@ pub struct TreeWalkerConfig {
     /// User-configured URLs to ignore (domain-level match on the focused
     /// browser tab's URL — see [`crate::url_filter::is_url_blocked`]).
     pub ignored_urls: Vec<String>,
+    /// Apps the walker must never touch via UI Automation (case-insensitive
+    /// substring match on the process/app name). Cross-process UIA reads make
+    /// the target app's provider observe an accessibility client
+    /// (`UiaClientsAreListening()`), and some apps change behavior on that —
+    /// classic Outlook auto-commits To:-field autocomplete suggestions while
+    /// a UIA client is present. For these apps the Windows walker returns an
+    /// empty `Found` snapshot (Win32 metadata only, no nodes/text) so paired
+    /// capture keeps the screenshot and falls back to OCR. Default:
+    /// `["outlook"]` (matches OUTLOOK.EXE, not olk.exe / new Outlook).
+    pub uia_passive_apps: Vec<String>,
     /// Monitor origin X in screen points (virtual desktop coordinate space).
     /// Used to normalize element bounds to monitor-relative 0-1 coords.
     pub monitor_x: f64,
@@ -493,6 +503,7 @@ impl Default for TreeWalkerConfig {
             ignored_window_patterns: Vec::new(),
             included_window_patterns: Vec::new(),
             ignored_urls: Vec::new(),
+            uia_passive_apps: vec!["outlook".to_string()],
             monitor_x: 0.0,
             monitor_y: 0.0,
             monitor_width: 0.0,
@@ -532,6 +543,13 @@ impl TreeWalkerConfig {
         } else {
             Cow::Borrowed(&self.included_window_patterns)
         }
+    }
+
+    /// True when `app_name` is UIA-passive: the walker must not make any UI
+    /// Automation call touching this app's windows. See
+    /// [`Self::uia_passive_apps`].
+    pub fn is_uia_passive(&self, app_name: &str) -> bool {
+        crate::config::app_matches_uia_passive(&self.uia_passive_apps, app_name)
     }
 
     /// Return the effective max_nodes (override if set, else default).
@@ -749,6 +767,24 @@ mod tests {
         assert_eq!(config.max_nodes, 5000);
         assert_eq!(config.walk_timeout, Duration::from_millis(250));
         assert_eq!(config.max_text_length, 50_000);
+        assert_eq!(config.uia_passive_apps, vec!["outlook".to_string()]);
+    }
+
+    #[test]
+    fn test_uia_passive_matcher() {
+        let config = TreeWalkerConfig::default();
+        // Default catches classic Outlook's process name in any casing…
+        assert!(config.is_uia_passive("OUTLOOK.EXE"));
+        assert!(config.is_uia_passive("outlook.exe"));
+        // …but not the new Outlook (olk.exe) or unrelated apps.
+        assert!(!config.is_uia_passive("olk.exe"));
+        assert!(!config.is_uia_passive("chrome.exe"));
+        assert!(!config.is_uia_passive(""));
+
+        let mut custom = TreeWalkerConfig::default();
+        custom.uia_passive_apps = vec!["SapGui".to_string()];
+        assert!(custom.is_uia_passive("sapgui.exe"));
+        assert!(!custom.is_uia_passive("OUTLOOK.EXE"));
     }
 
     #[test]

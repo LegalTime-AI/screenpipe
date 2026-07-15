@@ -30,6 +30,11 @@ pub struct VisionManagerConfig {
     pub ignored_windows: Vec<String>,
     pub included_windows: Vec<String>,
     pub ignored_urls: Vec<String>,
+    /// Apps the tree walker must never touch via UI Automation (Windows) —
+    /// they would detect an assistive-technology client and change behavior
+    /// (classic Outlook auto-commits To:-field autocomplete). Screenshots +
+    /// OCR still capture these apps; only a11y-tree reads are skipped.
+    pub uia_passive_apps: Vec<String>,
     pub vision_metrics: Arc<PipelineMetrics>,
     pub use_pii_removal: bool,
     /// Stable IDs of monitors the user selected for recording (e.g. "MSI G271_1920x1080_2002,-1080").
@@ -475,6 +480,7 @@ impl VisionManager {
             ignored_windows: self.config.ignored_windows.clone(),
             included_windows: self.config.included_windows.clone(),
             ignored_urls: self.config.ignored_urls.clone(),
+            uia_passive_apps: self.config.uia_passive_apps.clone(),
             monitor_x: monitor.x() as f64,
             monitor_y: monitor.y() as f64,
             monitor_width: monitor.width() as f64,
@@ -743,6 +749,7 @@ mod tests {
             ignored_windows: vec![],
             included_windows: vec![],
             ignored_urls: vec![],
+            uia_passive_apps: vec!["outlook".to_string()],
             vision_metrics: Arc::new(PipelineMetrics::default()),
             use_pii_removal: false,
             monitor_ids,

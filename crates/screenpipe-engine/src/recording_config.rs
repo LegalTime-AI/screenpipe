@@ -110,6 +110,11 @@ pub struct RecordingConfig {
     pub ignored_windows: Vec<String>,
     pub included_windows: Vec<String>,
     pub ignored_urls: Vec<String>,
+    /// Apps the engine must never touch via UI Automation (Windows) — they
+    /// would detect an assistive-technology client and change behavior (e.g.
+    /// classic Outlook auto-commits To:-field autocomplete). Vision/OCR
+    /// continues; only accessibility-tree reads are skipped.
+    pub uia_passive_apps: Vec<String>,
     /// Automatically detect and skip incognito / private browsing windows.
     pub ignore_incognito_windows: bool,
     /// Pause all screen capture when a DRM streaming app (Netflix, etc.) is focused.
@@ -340,6 +345,7 @@ impl RecordingConfig {
             ignored_windows: settings.ignored_windows.clone(),
             included_windows: settings.included_windows.clone(),
             ignored_urls: settings.ignored_urls.clone(),
+            uia_passive_apps: settings.uia_passive_apps.clone(),
             ignore_incognito_windows: settings.ignore_incognito_windows,
             pause_on_drm_content: settings.pause_on_drm_content,
             disable_clipboard_capture: settings.disable_clipboard_capture,
@@ -447,6 +453,7 @@ impl RecordingConfig {
             excluded_windows: self.ignored_windows.clone(),
             ignored_windows: self.ignored_windows.clone(),
             included_windows: self.included_windows.clone(),
+            uia_passive_apps: self.uia_passive_apps.clone(),
             capture_clipboard: !self.disable_clipboard_capture || capture_on_clipboard,
             capture_clipboard_content: !self.disable_clipboard_capture,
             // Keyboard events always reach the recorder so they can wake
@@ -520,6 +527,7 @@ impl RecordingConfig {
             ignored_windows: self.ignored_windows.clone(),
             included_windows: self.included_windows.clone(),
             ignored_urls: self.ignored_urls.clone(),
+            uia_passive_apps: self.uia_passive_apps.clone(),
             vision_metrics,
             use_pii_removal: self.use_pii_removal,
             monitor_ids: self.monitor_ids.clone(),
