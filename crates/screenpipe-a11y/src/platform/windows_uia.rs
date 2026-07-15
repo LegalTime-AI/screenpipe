@@ -21,15 +21,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, trace, warn};
 
-use windows::core::{implement, BSTR, VARIANT};
+use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Accessibility::{
     AutomationElementMode_Full, AutomationElementMode_None, CUIAutomation, IUIAutomation,
-    IUIAutomationCacheRequest, IUIAutomationElement, IUIAutomationFocusChangedEventHandler,
-    IUIAutomationFocusChangedEventHandler_Impl, IUIAutomationTreeWalker, TreeScope_Element,
+    IUIAutomationCacheRequest, IUIAutomationElement, IUIAutomationTreeWalker, TreeScope_Element,
     TreeScope_Subtree, UIA_AcceleratorKeyPropertyId, UIA_AccessKeyPropertyId,
     UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId,
     UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId, UIA_HelpTextPropertyId,
@@ -39,7 +38,8 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
-    MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT,
+    MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage, WindowFromPoint, MSG, PM_REMOVE,
+    QS_ALLINPUT,
 };
 
 const LOCKED_SCREEN_UIA_BACKOFF: Duration = Duration::from_millis(1000);
@@ -64,11 +64,23 @@ fn input_too_recent(
     now_ms.saturating_sub(last_input) < config.pause_extraction_on_input_ms
 }
 
-/// Shared state for pending focus changes (set by COM handler, read by UIA thread)
+/// Shared state for a pending (debounced) focus change. Armed by the UIA
+/// thread's foreground-window polling when it observes a new HWND; consumed
+/// after `tree_debounce_ms`. (Historically set by a UIA focus-changed COM
+/// handler — removed because the desktop-global subscription flipped
+/// `UiaClientsAreListening()` in every app; see `run_uia_thread`.)
 struct PendingFocus {
     hwnd: HWND,
     time: Instant,
 }
+
+/// How often the UIA worker polls `GetForegroundWindow` for focus edges when
+/// focus-driven work (tree walks or focused-element refresh) is enabled.
+/// This caps the worker's wait timeout, bounding focus-detection latency to
+/// ≤250ms — small next to the 300ms `tree_debounce_ms` that already gates
+/// the actual capture, so end-to-end focus latency stays comparable to the
+/// old event-driven path. One Win32 call per wakeup, no cross-process COM.
+const FOREGROUND_FOCUS_POLL_MS: u64 = 250;
 
 fn pause_uia_while_screen_locked(
     pending_focus: &Arc<Mutex<Option<PendingFocus>>>,
@@ -678,48 +690,6 @@ impl UiaContext {
             ancestors: None,
         }
     }
-
-    /// Subscribe to focus change events
-    fn subscribe_focus_changes(
-        &self,
-        handler: &IUIAutomationFocusChangedEventHandler,
-    ) -> windows::core::Result<()> {
-        unsafe { self.automation.AddFocusChangedEventHandler(None, handler) }
-    }
-
-    /// Unsubscribe from focus change events
-    fn unsubscribe_focus_changes(
-        &self,
-        handler: &IUIAutomationFocusChangedEventHandler,
-    ) -> windows::core::Result<()> {
-        unsafe { self.automation.RemoveFocusChangedEventHandler(handler) }
-    }
-}
-
-// ============================================================================
-// Focus Changed Event Handler (COM implementation)
-// ============================================================================
-
-#[implement(IUIAutomationFocusChangedEventHandler)]
-struct FocusChangedHandler {
-    pending: Arc<Mutex<Option<PendingFocus>>>,
-}
-
-impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
-    fn HandleFocusChangedEvent(
-        &self,
-        _sender: Option<&IUIAutomationElement>,
-    ) -> windows::core::Result<()> {
-        // Record the time of focus change; the UIA thread will debounce and capture
-        let hwnd = unsafe { GetForegroundWindow() };
-        if !hwnd.is_invalid() {
-            *self.pending.lock() = Some(PendingFocus {
-                hwnd,
-                time: Instant::now(),
-            });
-        }
-        Ok(())
-    }
 }
 
 // ============================================================================
@@ -814,21 +784,17 @@ pub fn run_uia_thread(
 
     debug!("UI Automation initialized successfully");
 
-    // Set up focus change handler
+    // Focus edges come from polling GetForegroundWindow (pure Win32) inside
+    // the main loop below — NOT from a UIA AddFocusChangedEventHandler
+    // subscription. The desktop-global subscription made every application's
+    // UIA provider observe an active accessibility client
+    // (`UiaClientsAreListening()` flips to TRUE process-wide), and Microsoft
+    // Office keys assistive-technology behavior on that flag: classic
+    // Outlook switches its To:-field autocomplete into screen-reader mode
+    // and auto-commits the first suggestion. Polling costs one Win32 call
+    // per wakeup (≤`FOREGROUND_FOCUS_POLL_MS` cadence) and emits zero
+    // cross-process COM traffic, so unread apps never see us.
     let pending_focus = Arc::new(Mutex::new(None::<PendingFocus>));
-    let handler = FocusChangedHandler {
-        pending: pending_focus.clone(),
-    };
-    let handler_interface: IUIAutomationFocusChangedEventHandler = handler.into();
-
-    if let Err(e) = uia.subscribe_focus_changes(&handler_interface) {
-        warn!(
-            "Failed to subscribe to focus changes: {:?}. Will use polling only.",
-            e
-        );
-    } else {
-        debug!("Subscribed to UIA focus change events");
-    }
 
     // State for debouncing and periodic capture
     let mut last_captured_hwnd: isize = 0;
@@ -841,8 +807,15 @@ pub fn run_uia_thread(
     // Seed initial state (no input has happened yet, so input_too_recent is a no-op).
     // Full tree walk only when tree capture is on; otherwise just prime the focused
     // element so click/app-switch enrichment has context from the start.
+    // The initial foreground HWND also seeds the focus poller so the first
+    // loop iteration doesn't re-treat the current window as a fresh edge.
+    let initial_hwnd = unsafe { GetForegroundWindow() };
+    let mut last_seen_foreground: isize = if initial_hwnd.is_invalid() {
+        0
+    } else {
+        initial_hwnd.0 as isize
+    };
     if config.capture_tree {
-        let initial_hwnd = unsafe { GetForegroundWindow() };
         if !initial_hwnd.is_invalid() {
             capture_and_send(
                 &uia,
@@ -870,7 +843,10 @@ pub fn run_uia_thread(
     // Main loop: pump messages + process events
     let mut msg = MSG::default();
     while !stop.load(Ordering::Relaxed) {
-        // Pump messages for COM event delivery (non-blocking)
+        // Pump messages so this STA thread stays serviceable for COM
+        // marshalling (non-blocking). No UIA event handler is registered
+        // anymore, but the apartment's hidden OLE window still receives
+        // housekeeping messages that must not pile up.
         unsafe {
             while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
@@ -889,6 +865,9 @@ pub fn run_uia_thread(
             if config.capture_tree {
                 let hwnd = unsafe { GetForegroundWindow() };
                 if !hwnd.is_invalid() {
+                    // Sync the focus poller so the fresh post-unlock capture
+                    // isn't immediately repeated as a polled focus edge.
+                    last_seen_foreground = hwnd.0 as isize;
                     capture_and_send(
                         &uia,
                         hwnd,
@@ -904,6 +883,29 @@ pub fn run_uia_thread(
                 }
             } else if config.capture_context {
                 refresh_focused_element(&uia, &config, &focused_element);
+            }
+        }
+
+        // Poll for foreground-window changes (replaces the removed UIA
+        // focus-changed event subscription — see the comment above the
+        // `pending_focus` declaration). On an edge, arm the same debounced
+        // pending-focus state the COM handler used to set, so the existing
+        // debounce/capture logic below is unchanged.
+        if config.capture_tree || config.capture_context {
+            let hwnd = unsafe { GetForegroundWindow() };
+            let hwnd_val = if hwnd.is_invalid() {
+                0
+            } else {
+                hwnd.0 as isize
+            };
+            if hwnd_val != last_seen_foreground {
+                last_seen_foreground = hwnd_val;
+                if hwnd_val != 0 {
+                    *pending_focus.lock() = Some(PendingFocus {
+                        hwnd,
+                        time: Instant::now(),
+                    });
+                }
             }
         }
 
@@ -975,12 +977,23 @@ pub fn run_uia_thread(
             }
         }
 
-        // Process click element requests
+        // Process click element requests. `ElementFromPointBuildCache` is a
+        // cross-process UIA read of whatever window owns the click point, so
+        // requests targeting a UIA-passive app are dropped (pure-Win32 check)
+        // before any UIA call is made.
         let clicks: Vec<ClickElementRequest> = {
             let mut queue = click_queue.lock();
             std::mem::take(&mut *queue)
         };
         for req in clicks {
+            if click_targets_uia_passive_app(&config, req.x, req.y) {
+                trace!(
+                    "Skipping click enrichment at ({}, {}): UIA-passive app",
+                    req.x,
+                    req.y
+                );
+                continue;
+            }
             if let Some(ctx) = uia.element_from_point(req.x, req.y) {
                 let _ = element_tx.try_send((req, ctx));
             }
@@ -1007,13 +1020,16 @@ pub fn run_uia_thread(
     }
 
     // Cleanup
-    let _ = uia.unsubscribe_focus_changes(&handler_interface);
+    drop(uia);
     unsafe { CoUninitialize() };
     debug!("UIA worker thread stopped");
 }
 
 /// Compute the next timeout for MsgWaitForMultipleObjects.
 /// Returns the minimum of:
+/// - Foreground-focus poll cadence (`FOREGROUND_FOCUS_POLL_MS`) whenever
+///   focus-driven work is enabled — focus edges are detected by polling,
+///   so the worker must wake at least that often
 /// - Time until debounce fires (if pending focus exists) — drives tree walks
 ///   (capture_tree) and focused-element refresh (capture_context)
 /// - Time until periodic re-capture (tree walks only)
@@ -1029,6 +1045,10 @@ fn compute_next_timeout(
 
     // Time until debounce fires
     if config.capture_tree || config.capture_context {
+        // Focus edges come from GetForegroundWindow polling — bound the wait
+        // so an edge is never observed later than the poll cadence.
+        min_ms = min_ms.min(FOREGROUND_FOCUS_POLL_MS);
+
         if let Some(ref pf) = *pending_focus.lock() {
             let elapsed = pf.time.elapsed();
             if elapsed >= debounce_dur {
@@ -1073,9 +1093,53 @@ fn refresh_focused_element(
         return;
     }
 
+    // UIA-passive apps: GetFocusedElementBuildCache is a cross-process UIA
+    // read of the focused app — it would mark an assistive-technology client
+    // as present inside that process. Skip before any UIA call; the stale
+    // focused-element context is preferable to changing the app's behavior.
+    if config.is_uia_passive(&app_name) {
+        trace!(
+            "Skipping focused-element refresh for UIA-passive app '{}'",
+            app_name
+        );
+        return;
+    }
+
     if let Some(ctx) = uia.get_focused_element() {
         *focused_element.lock() = Some(ctx);
     }
+}
+
+/// True when a click-enrichment request must be dropped because the resulting
+/// `ElementFromPointBuildCache` would be a UIA read into a UIA-passive app.
+///
+/// Resolved purely via Win32 (no UIA): checks the process owning the window
+/// at the click point (`WindowFromPoint` — the window ElementFromPoint would
+/// hit) and, belt-and-suspenders, the current foreground process (clicks
+/// foreground their target, and the queue drains within one loop wakeup).
+fn click_targets_uia_passive_app(config: &UiCaptureConfig, x: i32, y: i32) -> bool {
+    if config.uia_passive_apps.is_empty() {
+        return false;
+    }
+    unsafe {
+        let candidates = [WindowFromPoint(POINT { x, y }), GetForegroundWindow()];
+        for hwnd in candidates {
+            if hwnd.is_invalid() {
+                continue;
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 {
+                continue;
+            }
+            if let Some(name) = super::windows::get_process_name(pid) {
+                if config.is_uia_passive(&name) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Process names (lowercased, with extension) of apps whose in-process UI Automation
@@ -1128,6 +1192,19 @@ fn capture_and_send(
     // Check exclusions before making UIA tree calls. Some apps expose slow or
     // buggy providers, so the guard needs to happen before ElementFromHandle.
     if !config.should_capture_target(&app_name, window_title.as_deref()) {
+        return;
+    }
+
+    // UIA-passive apps: never issue any UIA call against their windows —
+    // ElementFromHandle/tree walks make the app's provider observe an
+    // assistive-technology client and can change its behavior (classic
+    // Outlook auto-commits To:-field autocomplete). `last_capture_time` was
+    // already bumped above, so the periodic timer doesn't spin on the skip.
+    if config.is_uia_passive(&app_name) {
+        trace!(
+            "Skipping UIA tree capture for passive app '{}' (would flip UiaClientsAreListening)",
+            app_name
+        );
         return;
     }
 
@@ -1675,10 +1752,14 @@ mod tests {
     fn test_compute_next_timeout_ignores_periodic_interval_without_capture_tree() {
         // Even with an interval configured, the periodic timer only drives full
         // tree walks — it must not wake the worker when capture_tree is off.
+        // With capture_context on (the default), the wait is bounded by the
+        // foreground-focus poll cadence instead — focus edges are detected by
+        // polling GetForegroundWindow, not by a UIA event subscription.
         let pending_focus = Arc::new(Mutex::new(None::<PendingFocus>));
         let mut config = UiCaptureConfig::new();
         config.capture_tree = false;
         config.tree_capture_interval_ms = 1;
+        assert!(config.capture_context);
 
         let wait_ms = compute_next_timeout(
             &pending_focus,
@@ -1688,7 +1769,40 @@ mod tests {
             &config,
         );
 
-        assert_eq!(wait_ms, 1000);
+        assert_eq!(wait_ms, FOREGROUND_FOCUS_POLL_MS);
+    }
+
+    #[test]
+    fn test_compute_next_timeout_bounded_by_focus_poll_cadence() {
+        // No pending focus and no periodic work: the worker must still wake
+        // within the poll cadence to detect foreground-window edges, for both
+        // capture_context-only and capture_tree configurations.
+        let pending_focus = Arc::new(Mutex::new(None::<PendingFocus>));
+
+        let mut context_only = UiCaptureConfig::new();
+        context_only.capture_tree = false;
+        context_only.tree_capture_interval_ms = 0;
+        assert!(context_only.capture_context);
+
+        let mut tree_on = UiCaptureConfig::new();
+        tree_on.capture_tree = true;
+        tree_on.tree_capture_interval_ms = 0;
+
+        for config in [&context_only, &tree_on] {
+            let wait_ms = compute_next_timeout(
+                &pending_focus,
+                Duration::from_millis(300),
+                &Instant::now(),
+                Duration::from_millis(0),
+                config,
+            );
+            assert!(
+                wait_ms <= FOREGROUND_FOCUS_POLL_MS,
+                "wait {}ms exceeds focus poll cadence {}ms",
+                wait_ms,
+                FOREGROUND_FOCUS_POLL_MS
+            );
+        }
     }
 
     /// Comprehensive live test: enumerate ALL visible windows, capture each tree,

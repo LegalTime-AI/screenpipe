@@ -568,6 +568,15 @@ pub struct RecordArgs {
     #[arg(long)]
     pub ignored_urls: Vec<String>,
 
+    /// Apps the engine must never touch via UI Automation (they would detect
+    /// an assistive-technology client and change behavior — e.g. classic
+    /// Outlook auto-selects To: autocomplete when a UIA client is present).
+    /// Vision/OCR capture continues; only accessibility-tree reads are
+    /// skipped. Case-insensitive substring match on the process name.
+    /// Repeatable; passing the flag replaces the default (outlook).
+    #[arg(long, default_value = "outlook")]
+    pub uia_passive_apps: Vec<String>,
+
     /// Apps / meeting services to exclude from automatic meeting detection
     /// (case-insensitive contains). Matches the running app's name/process or
     /// the matched detection profile's identifiers, so an entry can be the app
@@ -817,6 +826,7 @@ pub struct RecordArgSources {
     pub ignored_windows: bool,
     pub included_windows: bool,
     pub ignored_urls: bool,
+    pub uia_passive_apps: bool,
     pub ignored_meeting_apps: bool,
     pub deepgram_api_key: bool,
     pub transcription_mode: bool,
@@ -877,6 +887,7 @@ impl RecordArgSources {
             ignored_windows: from_command_line(record, "ignored_windows"),
             included_windows: from_command_line(record, "included_windows"),
             ignored_urls: from_command_line(record, "ignored_urls"),
+            uia_passive_apps: from_command_line(record, "uia_passive_apps"),
             ignored_meeting_apps: from_command_line(record, "ignored_meeting_apps"),
             deepgram_api_key: from_command_line(record, "deepgram_api_key"),
             transcription_mode: from_command_line(record, "transcription_mode"),
@@ -926,6 +937,7 @@ impl RecordArgSources {
             || self.ignored_windows
             || self.included_windows
             || self.ignored_urls
+            || self.uia_passive_apps
             || self.ignored_meeting_apps
             || self.deepgram_api_key
             || self.transcription_mode
@@ -1020,6 +1032,7 @@ impl RecordArgs {
             excluded_windows: self.ignored_windows.clone(),
             ignored_windows: self.ignored_windows.clone(),
             included_windows: self.included_windows.clone(),
+            uia_passive_apps: self.uia_passive_apps.clone(),
             // Keep operation detection alive when clipboard-triggered capture
             // is enabled, but do not store rows/content when the user opted out.
             capture_clipboard: !self.disable_clipboard_capture || capture_on_clipboard,
@@ -1098,6 +1111,7 @@ impl RecordArgs {
             ignored_windows: self.ignored_windows.clone(),
             included_windows: self.included_windows.clone(),
             ignored_urls: self.ignored_urls.clone(),
+            uia_passive_apps: self.uia_passive_apps.clone(),
             ignored_meeting_apps: self.ignored_meeting_apps.clone(),
             languages: self
                 .language
@@ -1408,6 +1422,9 @@ impl RecordArgs {
         }
         if sources.ignored_urls {
             settings.ignored_urls = self.ignored_urls.clone();
+        }
+        if sources.uia_passive_apps {
+            settings.uia_passive_apps = self.uia_passive_apps.clone();
         }
         if sources.ignored_meeting_apps {
             settings.ignored_meeting_apps = self.ignored_meeting_apps.clone();
