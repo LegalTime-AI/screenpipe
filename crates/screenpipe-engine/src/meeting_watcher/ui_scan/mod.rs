@@ -84,6 +84,7 @@ pub async fn run_meeting_detection_loop(
     detector: Option<Arc<screenpipe_audio::meeting_detector::MeetingDetector>>,
     close_orphaned_meetings_on_start: bool,
     ignored_meeting_apps: Vec<String>,
+    uia_passive_apps: Vec<String>,
 ) {
     let profiles = load_detection_profiles();
     let scanner = Arc::new(MeetingUiScanner::new());
@@ -91,7 +92,18 @@ pub async fn run_meeting_detection_loop(
     let base_interval = scan_interval.unwrap_or(ACTIVE_SCAN_INTERVAL);
     let mut current_interval = base_interval;
     let mut idle_scan_count: u64 = 0;
-    let ignored_meeting_app_terms = normalize_ignored_meeting_apps(&ignored_meeting_apps);
+    // This detector identifies meetings by walking each candidate app's UI
+    // Automation tree — which flips UiaClientsAreListening() in that app. Apps
+    // on `uia_passive_apps` must never be UIA-touched (Outlook auto-selects
+    // To:-field autocomplete when it sees a UIA client), so fold them into the
+    // ignore set: they are dropped from the running-app list before any scan.
+    // The default ["outlook"] matches no meeting profile, so default detection
+    // is unchanged; adding a real meeting app (e.g. "zoom") here trades its
+    // meeting detection for UIA silence — exactly the flag's documented
+    // contract. Only the UIA scanner is restricted; the audio-process detector
+    // does no UIA and keeps its own unmodified ignore list.
+    let mut ignored_meeting_app_terms = normalize_ignored_meeting_apps(&ignored_meeting_apps);
+    ignored_meeting_app_terms.extend(normalize_ignored_meeting_apps(&uia_passive_apps));
 
     // Check if any profile uses browser URL or title patterns (to gate DB query)
     let has_browser_profiles = profiles.iter().any(|p| {

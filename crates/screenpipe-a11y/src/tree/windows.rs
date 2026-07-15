@@ -206,7 +206,12 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         let mut pid: u32 = 0;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         // Resolve logical app name — handles WebView2 and shell-hosted Edge.
-        let app_name = crate::platform::windows::get_effective_app_name(hwnd, pid);
+        // `name_resolved` is false when the process name could not be read
+        // (transient snapshot failure / protected process) and fell back to
+        // "Unknown"; the UIA-passive gate below fails closed in that case so a
+        // focused Outlook window can never slip past it into a full UIA walk.
+        let (app_name, name_resolved) =
+            crate::platform::windows::get_effective_app_name_checked(hwnd, pid);
 
         // Skip excluded apps
         let app_lower = app_name.to_lowercase();
@@ -273,8 +278,18 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         // OCR). An empty `Found` snapshot keeps the Win32 app/window
         // metadata and, with `text_content` empty, makes
         // `has_accessibility_text` false so the existing OCR fallback runs.
-        if self.config.is_uia_passive(&app_name) {
-            debug!(app = %app_name, pid, "a11y: UIA-passive app — Win32 metadata only, OCR fallback");
+        if !name_resolved || self.config.is_uia_passive(&app_name) {
+            if name_resolved {
+                debug!(app = %app_name, pid, "a11y: UIA-passive app — Win32 metadata only, OCR fallback");
+            } else {
+                // Fail closed: an unresolved process name might be a passive
+                // app (e.g. Outlook). Skip UIA and let OCR carry the frame
+                // rather than risk flipping the target into screen-reader mode.
+                debug!(
+                    pid,
+                    "a11y: unresolved process name — UIA-passive fallback (fail closed)"
+                );
+            }
             return Ok(TreeWalkResult::Found(passive_snapshot(
                 hwnd,
                 app_name,

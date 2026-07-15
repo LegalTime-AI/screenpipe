@@ -1283,10 +1283,16 @@ fn capture_and_send(
 
     let _ = tree_tx.try_send(snapshot);
 
-    // Also update the focused element
-    if let Some(ctx) = uia.get_focused_element() {
-        *focused_element.lock() = Some(ctx);
-    }
+    // Also update the focused element. Route through refresh_focused_element
+    // rather than calling get_focused_element() directly: the tree we just
+    // walked belongs to `hwnd`, but focus can have moved to another app
+    // mid-walk (the cached subtree call is synchronous and can take up to the
+    // 250ms deadline). A raw GetFocusedElement here would read that new
+    // foreground element cross-process — flipping UiaClientsAreListening() in,
+    // e.g., Outlook if the user just clicked into it, defeating the passive
+    // protection. refresh_focused_element re-resolves the CURRENT foreground
+    // and applies the should_capture_target + UIA-passive gates first.
+    refresh_focused_element(uia, config, focused_element);
 }
 
 /// Compute a hash of the entire tree for change detection

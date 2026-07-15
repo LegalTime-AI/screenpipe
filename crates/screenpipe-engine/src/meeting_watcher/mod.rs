@@ -41,6 +41,11 @@ pub fn start_meeting_watcher(
     detector: Option<Arc<MeetingDetector>>,
     close_orphaned_meetings_on_start: bool,
     ignored_meeting_apps: Vec<String>,
+    // Apps that must never be touched via UI Automation. Only the UI-scan
+    // detector consults this (it is the only mode that walks UIA trees); the
+    // audio-process detector does no UIA, so it keeps its own ignore list
+    // unrestricted.
+    uia_passive_apps: Vec<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         match selected_detector_mode() {
@@ -66,6 +71,7 @@ pub fn start_meeting_watcher(
                     detector,
                     close_orphaned_meetings_on_start,
                     ignored_meeting_apps,
+                    uia_passive_apps,
                 )
                 .await;
             }

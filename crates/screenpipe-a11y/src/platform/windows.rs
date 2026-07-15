@@ -2124,7 +2124,25 @@ pub(crate) fn normalize_app_name(raw_process: &str, window_class: &str) -> Strin
 ///    (`Chrome_WidgetWin_1`) lets us detect this and return `"msedge.exe"` instead,
 ///    so user exclusions for Edge correctly suppress these windows.
 pub(crate) fn get_effective_app_name(hwnd: HWND, pid: u32) -> String {
-    let raw = get_process_name(pid).unwrap_or_else(|| "Unknown".to_string());
+    get_effective_app_name_checked(hwnd, pid).0
+}
+
+/// Like [`get_effective_app_name`], but also reports whether the underlying
+/// process name actually resolved. The bool is `false` when `get_process_name`
+/// returned `None` (a transient Toolhelp snapshot failure, or a protected
+/// process) and the name fell back to `"Unknown"`. Callers that gate safety
+/// behavior on the app name — e.g. the UIA-passive exemption — must fail closed
+/// on `false` rather than trust an "Unknown" name that could really be Outlook.
+///
+/// Note: `get_process_name` caches for 60s, so a PID recycled to a new process
+/// within that window can briefly report the prior owner's name. That residual
+/// race is accepted — it is far rarer than an outright resolution failure, and
+/// the passive gate's cost of a false positive (OCR instead of a11y text) is
+/// low.
+pub(crate) fn get_effective_app_name_checked(hwnd: HWND, pid: u32) -> (String, bool) {
+    let resolved = get_process_name(pid);
+    let name_resolved = resolved.is_some();
+    let raw = resolved.unwrap_or_else(|| "Unknown".to_string());
     let window_class = unsafe {
         let mut buf = [0u16; 128];
         let len = GetClassNameW(hwnd, &mut buf);
@@ -2145,7 +2163,7 @@ pub(crate) fn get_effective_app_name(hwnd: HWND, pid: u32) -> String {
             "a11y: app name normalised"
         );
     }
-    effective
+    (effective, name_resolved)
 }
 
 /// Cheaply resolve the focused window's (app name, window title) without any
