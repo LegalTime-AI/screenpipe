@@ -59,13 +59,31 @@ impl SnapshotWriter {
         captured_at: DateTime<Utc>,
         monitor_id: u32,
     ) -> Result<PathBuf> {
+        self.write_with_focus(image, captured_at, monitor_id, false)
+    }
+
+    /// Write a screenshot while retaining whether this monitor hosted the
+    /// focused window. The optional suffix gives downstream local replay a
+    /// stable, DB-schema-independent focus signal.
+    pub fn write_with_focus(
+        &self,
+        image: &DynamicImage,
+        captured_at: DateTime<Utc>,
+        monitor_id: u32,
+        monitor_hosts_focus: bool,
+    ) -> Result<PathBuf> {
         let date_dir = self
             .base_dir
             .join(captured_at.format("%Y-%m-%d").to_string());
         fs::create_dir_all(&date_dir)?;
 
         let timestamp_ms = captured_at.timestamp_millis();
-        let filename = format!("{}_m{}.jpg", timestamp_ms, monitor_id);
+        let focus_suffix = if monitor_hosts_focus {
+            format!("_f{}", monitor_id)
+        } else {
+            String::new()
+        };
+        let filename = format!("{}_m{}{}.jpg", timestamp_ms, monitor_id, focus_suffix);
         let path = date_dir.join(&filename);
 
         let quality = self.quality.load(Ordering::Relaxed);
@@ -200,6 +218,20 @@ mod tests {
         let path = writer.write(&img, now, 2).unwrap();
         let filename = path.file_name().unwrap().to_string_lossy();
         assert!(filename.contains("_m2.jpg"));
+    }
+
+    #[test]
+    fn test_write_with_focus_marks_the_focused_monitor() {
+        let tmp = TempDir::new().unwrap();
+        let writer = SnapshotWriter::new(tmp.path(), 80, 0);
+        let path = writer
+            .write_with_focus(&test_image(100, 100), Utc::now(), 2, true)
+            .unwrap();
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("_m2_f2.jpg"));
     }
 
     #[test]

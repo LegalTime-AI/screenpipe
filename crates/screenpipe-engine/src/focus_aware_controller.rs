@@ -206,6 +206,15 @@ impl FocusAwareController {
         self.state_for_identity(&MonitorIdentity::from_monitor(monitor))
     }
 
+    /// Whether this display is the current, positively identified focus
+    /// target. Unlike [`Self::state_for_monitor`], this deliberately returns
+    /// false for the all-Active safety fallback used when focus is unknown or
+    /// stale: callers that persist focus metadata must not label every
+    /// display as focused in that situation.
+    pub fn monitor_hosts_focus(&self, monitor: &screenpipe_screen::monitor::SafeMonitor) -> bool {
+        self.identity_hosts_focus(&MonitorIdentity::from_monitor(monitor))
+    }
+
     #[cfg(test)]
     pub(crate) fn state(&self, monitor_id: u32) -> CaptureState {
         self.state_for_identity(&MonitorIdentity::runtime_id(monitor_id))
@@ -269,6 +278,24 @@ impl FocusAwareController {
                 }
             }
         }
+    }
+
+    fn identity_hosts_focus(&self, identity: &MonitorIdentity) -> bool {
+        let last_event_elapsed = self
+            .last_event_time
+            .lock()
+            .ok()
+            .map(|t| t.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+        if last_event_elapsed >= STALE_FOCUS_CUTOFF {
+            return false;
+        }
+
+        self.current_focus
+            .lock()
+            .ok()
+            .and_then(|current| current.as_ref().map(|focused| focused.matches(identity)))
+            .unwrap_or(false)
     }
 
     /// Returns the notify for a monitor (creates on first call). Cold loops
@@ -429,6 +456,19 @@ mod tests {
         ctrl.set_unknown_for_test();
         assert_eq!(ctrl.state(1), CaptureState::Active);
         assert_eq!(ctrl.state(2), CaptureState::Active);
+    }
+
+    #[tokio::test]
+    async fn focus_metadata_marks_only_a_known_focused_monitor() {
+        let ctrl = make_ctrl();
+        assert!(!ctrl.identity_hosts_focus(&MonitorIdentity::runtime_id(1)));
+
+        ctrl.set_focus_for_test(1);
+        assert!(ctrl.identity_hosts_focus(&MonitorIdentity::runtime_id(1)));
+        assert!(!ctrl.identity_hosts_focus(&MonitorIdentity::runtime_id(2)));
+
+        ctrl.set_unknown_for_test();
+        assert!(!ctrl.identity_hosts_focus(&MonitorIdentity::runtime_id(1)));
     }
 
     #[tokio::test]

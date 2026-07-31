@@ -233,9 +233,12 @@ pub async fn paired_capture(
         );
         String::new()
     } else {
-        let snapshot_path =
-            ctx.snapshot_writer
-                .write(&ctx.image, ctx.captured_at, ctx.monitor_id)?;
+        let snapshot_path = ctx.snapshot_writer.write_with_focus(
+            &ctx.image,
+            ctx.captured_at,
+            ctx.monitor_id,
+            ctx.monitor_hosts_focus,
+        )?;
         debug!(
             "paired_capture: snapshot written in {:?} (trigger={})",
             start.elapsed(),

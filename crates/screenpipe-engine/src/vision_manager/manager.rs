@@ -42,6 +42,10 @@ pub struct VisionManagerConfig {
     pub monitor_ids: Vec<String>,
     /// When true, record every connected monitor regardless of `monitor_ids`.
     pub use_all_monitors: bool,
+    /// Keep every allowed display on the normal capture path instead of
+    /// throttling non-focused displays to Warm/Cold. Opt-in only, for clients
+    /// that require complete cross-display activity evidence.
+    pub full_monitor_capture: bool,
     /// Automatically detect and skip incognito / private browsing windows.
     pub ignore_incognito_windows: bool,
     /// Pause all screen capture when a DRM streaming app (Netflix, etc.) is focused.
@@ -149,11 +153,9 @@ impl VisionManager {
             spawn_frame_linker(db.clone(), linker_rx, linker_stop.clone());
         }
 
-        // Focus-aware capture is always on. `new_tracker()` always succeeds —
-        // returns a null tracker on platforms without a native impl. Controller
-        // fallback handles `Unknown` events by treating all monitors as Active,
-        // so users whose systems can't report focus still get the pre-feature
-        // behaviour (every monitor captured at full rate).
+        // Focus tracking is always available for metadata and OCR scoping.
+        // `full_monitor_capture` below bypasses its Warm/Cold throttling while
+        // preserving that focus signal for each written snapshot.
         let focus_controller = {
             let _guard = vision_handle.enter();
             let tracker = crate::focus_tracker::new_tracker();
@@ -536,6 +538,7 @@ impl VisionManager {
         let languages = self.config.languages.clone();
         let power_profile_rx = self.power_profile_rx.clone();
         let focus_controller = self.focus_controller.clone();
+        let full_monitor_capture = self.config.full_monitor_capture;
         let linker_tx = Some(self.linker_tx.clone());
         let high_fps_controller = self.high_fps_controller.clone();
 
@@ -591,6 +594,7 @@ impl VisionManager {
                 languages,
                 power_profile_rx,
                 focus_controller,
+                full_monitor_capture,
                 linker_tx,
                 high_fps_controller,
             )
@@ -685,6 +689,13 @@ impl VisionManager {
             .collect()
     }
 
+    /// Whether this recorder has explicitly opted into full capture on every
+    /// allowed display. Used by health reporting to distinguish an intentional
+    /// single-monitor profile from a missing all-display capture loop.
+    pub fn full_monitor_capture(&self) -> bool {
+        self.config.full_monitor_capture
+    }
+
     /// Pause recording on a specific monitor in response to a user action
     /// (the recording popover). Records the intent first — so the monitor
     /// watcher won't auto-restart it on the next reconcile tick — then tears
@@ -754,6 +765,7 @@ mod tests {
             use_pii_removal: false,
             monitor_ids,
             use_all_monitors: false,
+            full_monitor_capture: false,
             ignore_incognito_windows: false,
             pause_on_drm_content: false,
             languages: vec![Language::English],
