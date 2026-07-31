@@ -673,6 +673,7 @@ pub async fn event_driven_capture_loop(
     languages: Vec<screenpipe_core::Language>,
     power_profile_rx: Option<watch::Receiver<PowerProfile>>,
     focus_controller: Arc<crate::focus_aware_controller::FocusAwareController>,
+    full_monitor_capture: bool,
     linker_tx: Option<crate::frame_linker_actor::LinkerSender>,
     // Runtime control surface for the high-FPS override (manual + auto modes).
     // The loop polls `effective_interval_ms()` each tick; `None` here means
@@ -834,7 +835,7 @@ pub async fn event_driven_capture_loop(
                 false, // screenshot enabled on startup
                 false, // hd not active at startup (Manual is dedup-exempt anyway)
                 false, // not in a meeting at startup
-                true,  // focus unknown at startup — controller defaults to Active
+                focus_controller.monitor_hosts_focus(&monitor),
             ),
         )
         .await
@@ -927,7 +928,7 @@ pub async fn event_driven_capture_loop(
             break;
         }
 
-        // Focus-aware gating — always on. Skips or pauses capture on
+        // Focus-aware gating skips or pauses capture on
         // non-focused monitors. If focus resolution fails on this platform
         // (Linux Wayland, permission denied, etc.) the controller's
         // NullFocusTracker + Unknown-event fallback makes `state()` return
@@ -939,7 +940,7 @@ pub async fn event_driven_capture_loop(
         // detection. This lets the Warm path capture only when pixels
         // actually changed without duplicating the whole capture machinery.
         let mut warm_trigger_override: Option<CaptureTrigger> = None;
-        {
+        if !full_monitor_capture {
             use crate::focus_aware_controller::CaptureState;
             let capture_state = focus_controller.state_for_monitor(&monitor);
 
@@ -1046,6 +1047,11 @@ pub async fn event_driven_capture_loop(
                     continue;
                 }
             }
+        } else {
+            // The controller continues tracking focus for metadata and OCR
+            // scoping, but this explicit mode never lets it suppress a
+            // selected monitor's capture loop.
+            was_cold = false;
         }
 
         // Unified pause-state gate: when the screen is locked, the power
@@ -1539,13 +1545,12 @@ pub async fn event_driven_capture_loop(
                         screenshot_disabled,
                         hd_active,
                         in_meeting,
-                        // Meeting-OCR-gate scope (#5054): only the monitor
-                        // hosting the focused window is gated; Active is also
-                        // the controller's safe fallback when focus is unknown.
-                        matches!(
-                            focus_controller.state_for_monitor(&monitor),
-                            crate::focus_aware_controller::CaptureState::Active
-                        ),
+                        // Meeting-OCR-gate scope (#5054) and snapshot focus
+                        // metadata both require a positively identified
+                        // focus target. The all-Active fallback used for
+                        // unreliable focus tracking must not label every
+                        // display as focused.
+                        focus_controller.monitor_hosts_focus(&monitor),
                     ),
                 )
                 .await;

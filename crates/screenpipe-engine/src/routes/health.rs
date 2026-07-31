@@ -275,6 +275,11 @@ pub struct HealthCheckResponse {
     pub capture_status: CaptureStatusInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monitors: Option<Vec<String>>,
+    /// Present only when the recorder explicitly requested full capture on
+    /// every selected display. Clients can then distinguish a healthy primary
+    /// display from a missing secondary capture loop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_coverage: Option<MonitorCoverageInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<PipelineHealthInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -340,6 +345,14 @@ pub struct CaptureStatusInfo {
     pub paused_audio_devices: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_transcription_segments: Option<u64>,
+}
+
+#[derive(Serialize, OaSchema, Deserialize, Clone)]
+pub struct MonitorCoverageInfo {
+    /// Connected displays known to the monitor watcher.
+    pub connected: usize,
+    /// Per-display capture tasks still running after dead-task cleanup.
+    pub active: usize,
 }
 
 #[derive(Serialize, OaSchema, Deserialize, Clone)]
@@ -581,6 +594,7 @@ fn degraded_response() -> HealthCheckResponse {
             pending_transcription_segments: None,
         },
         monitors: None,
+        monitor_coverage: None,
         pipeline: None,
         audio_pipeline: None,
         accessibility: None,
@@ -1224,6 +1238,20 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         None
     };
 
+    let monitor_coverage = if !state.vision_disabled {
+        match state.vision_manager.load().as_ref().clone() {
+            Some(vision_manager) if vision_manager.full_monitor_capture() => {
+                Some(MonitorCoverageInfo {
+                    connected: monitors.as_ref().map_or(0, |items| items.len()),
+                    active: vision_manager.active_monitors().await.len(),
+                })
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // Build pipeline metrics from the snapshot already taken above
     let pipeline = if !state.vision_disabled {
         let total_ocr_ops = vision_snap.ocr_cache_hits + vision_snap.ocr_cache_misses;
@@ -1283,6 +1311,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         device_status_details,
         capture_status,
         monitors,
+        monitor_coverage,
         pipeline,
         accessibility: {
             let snap = tree_walker_snapshot();
@@ -1585,6 +1614,7 @@ mod tests {
                 pending_transcription_segments: None,
             },
             monitors: None,
+            monitor_coverage: None,
             pipeline: None,
             audio_pipeline: None,
             accessibility: None,

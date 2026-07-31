@@ -18,6 +18,18 @@ use std::time::Duration;
 
 use crate::vision_manager::VisionManagerConfig;
 
+/// Opt-in for integrations that need a fresh capture loop on every selected
+/// display. The default retains Screenpipe's focus-aware CPU-saving behaviour.
+/// LegalTime sets this for its full multi-monitor timekeeping mode.
+pub const FULL_MONITOR_CAPTURE_ENV: &str = "SCREENPIPE_FULL_MONITOR_CAPTURE";
+
+pub fn full_monitor_capture_from_env(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 /// Unified recording configuration used by both the CLI binary and the Tauri embedded server.
 /// Replaces the former `EmbeddedServerConfig` and eliminates duplicate field mapping.
 #[derive(Clone, Debug)]
@@ -532,6 +544,9 @@ impl RecordingConfig {
             use_pii_removal: self.use_pii_removal,
             monitor_ids: self.monitor_ids.clone(),
             use_all_monitors: self.use_all_monitors,
+            full_monitor_capture: full_monitor_capture_from_env(
+                std::env::var(FULL_MONITOR_CAPTURE_ENV).ok().as_deref(),
+            ),
             ignore_incognito_windows: self.ignore_incognito_windows,
             pause_on_drm_content: self.pause_on_drm_content,
             languages: self.languages.clone(),
@@ -780,6 +795,7 @@ mod tests {
         assert_eq!(vision.included_windows, settings.included_windows);
         assert_eq!(vision.monitor_ids, settings.monitor_ids);
         assert!(!vision.use_all_monitors);
+        assert!(!vision.full_monitor_capture);
         assert!(vision.ignore_incognito_windows);
         assert!(vision.pause_on_drm_content);
         assert_eq!(vision.video_quality, "high");
@@ -790,6 +806,22 @@ mod tests {
         assert_eq!(vision.min_capture_interval_ms, Some(120));
         assert_eq!(vision.capture_on_keystroke, Some(true));
         assert_eq!(vision.capture_on_clipboard, Some(true));
+    }
+
+    #[test]
+    fn full_monitor_capture_env_requires_an_explicit_truthy_value() {
+        for value in [Some("1"), Some("true"), Some("YES"), Some(" on ")] {
+            assert!(full_monitor_capture_from_env(value));
+        }
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("anything else"),
+        ] {
+            assert!(!full_monitor_capture_from_env(value));
+        }
     }
 
     fn langs(items: &[&str]) -> Vec<String> {
