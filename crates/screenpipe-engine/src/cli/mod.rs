@@ -601,6 +601,11 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub disable_telemetry: bool,
 
+    /// Disable scheduled pipes and the bundled coding-agent runtime.
+    /// Recording, indexing, search, and the local API remain available.
+    #[arg(long, default_value_t = false)]
+    pub disable_pipes: bool,
+
     /// Video quality preset: low, balanced, high, max
     #[arg(long, default_value = "balanced")]
     pub video_quality: String,
@@ -2680,6 +2685,13 @@ mod tests {
         assert!(args.api_auth);
         assert!(args.use_all_monitors);
         assert!(args.use_system_default_audio);
+        assert!(!args.disable_pipes);
+    }
+
+    #[test]
+    fn test_disable_pipes_is_explicitly_opt_in() {
+        let args = record_args(["screenpipe", "record", "--disable-pipes"]);
+        assert!(args.disable_pipes);
     }
 
     #[test]
