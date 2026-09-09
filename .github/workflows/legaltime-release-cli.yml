@@ -218,6 +218,8 @@ jobs:
             echo "::error::binary reports '$GOT', expected '$VERSION' — version stamp did not reach the build"
             exit 1
           fi
+          "packages/cli/screenpipe-${{ matrix.npm_target }}/bin/screenpipe" record \
+            --disable-audio --detect-meetings-without-audio --disable-pipes --help > /dev/null
 
       - name: Pack tarball (npm layout)
         run: |
@@ -444,6 +446,8 @@ jobs:
             Write-Host "::error::binary reports '$($Matches[1])', expected '$env:VERSION' — version stamp did not reach the build"
             exit 1
           }
+          & $exe record --disable-audio --detect-meetings-without-audio --disable-pipes --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "screen-only detector contract failed" }
 
       - name: Pack tarball (npm layout)
         shell: pwsh
@@ -495,6 +499,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: legaltime-v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: LegalTime CLI v${{ needs.version.outputs.version }}
           prerelease: true
           fail_on_unmatched_files: true

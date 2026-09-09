@@ -786,6 +786,11 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub disable_meeting_detector: bool,
 
+    /// Keep OS call detection running in a screen-only process. This never
+    /// enables audio recording; an external consumer can own call audio.
+    #[arg(long, default_value_t = false)]
+    pub detect_meetings_without_audio: bool,
+
     /// Enable the work-hours recording schedule. When set, capture runs only
     /// inside the windows defined by `--schedule-rule` and pauses (without
     /// exiting the process) outside them. Off by default (records 24/7).
@@ -1014,6 +1019,11 @@ fn parse_schedule_rule(s: &str) -> Result<screenpipe_config::ScheduleRule, Strin
 }
 
 impl RecordArgs {
+    /// The explicit detector opt-out always wins, including persisted settings.
+    pub fn meeting_detection_enabled(&self, audio_disabled: bool, detector_disabled: bool) -> bool {
+        !detector_disabled && (!audio_disabled || self.detect_meetings_without_audio)
+    }
+
     pub fn unique_languages(&self) -> Result<Vec<Language>, String> {
         let mut unique_langs = std::collections::HashSet::new();
         for lang in &self.language {
@@ -2692,6 +2702,23 @@ mod tests {
     fn test_disable_pipes_is_explicitly_opt_in() {
         let args = record_args(["screenpipe", "record", "--disable-pipes"]);
         assert!(args.disable_pipes);
+    }
+
+    #[test]
+    fn test_screen_only_meeting_detection_is_explicit_and_never_enables_audio() {
+        let defaults = record_args(["screenpipe", "record"]);
+        assert!(!defaults.meeting_detection_enabled(true, false));
+        assert!(defaults.meeting_detection_enabled(false, false));
+        let args = record_args([
+            "screenpipe",
+            "record",
+            "--disable-audio",
+            "--detect-meetings-without-audio",
+        ]);
+        assert!(args.disable_audio);
+        assert!(args.meeting_detection_enabled(true, false));
+        assert!(!args.meeting_detection_enabled(true, true));
+        assert!(!args.meeting_detection_enabled(false, true));
     }
 
     #[test]
