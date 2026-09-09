@@ -104,6 +104,8 @@ commits: `28e5c247`
 
 ### 4. audio device handling
 
+- [ ] **screen-only detector consumer** — run `record --disable-audio --detect-meetings-without-audio --disable-pipes`, join a call, switch to another app and remain silent, then hang up. One detector row retains the full occurrence. This process never starts an audio input/output recorder; omitting the detector opt-in preserves the default screen-only behavior.
+
 - [ ] **CoreAudio Process Tap (experimental)** — with `experimentalCoreaudioSystemAudio` ON on macOS 14.4+, System Audio uses the CoreAudio Process Tap and rebuilds if silence is detected; with the flag OFF (default) System Audio uses SCK. (`75a52603b`, `5634664da`)
 - [ ] **meeting piggyback OFF (default)** — with `experimentalMeetingPiggyback` off, a meeting starts/ends with zero device-set changes: no "Meeting Tap" device, no suspensions, logs contain no `meeting_piggyback` actions.
 - [ ] **meeting piggyback ON, detected meeting** — flag on ("Smart recording" in settings), ANY capture mode, macOS 14.4+: join a Zoom call with a NON-default mic selected in Zoom → within ~4s a "Meeting Tap (output)" session stream starts, and within ~6s (two confirmation ticks — we never race the app's own device acquisition) the Zoom-selected mic is capturing; the global "System Audio (output)" stream and non-resolved mics are suspended; transcripts attribute to "Meeting Tap"/the resolved mic; on meeting end everything reverts and the resolved mic is NOT left in enabled devices (settings unchanged).

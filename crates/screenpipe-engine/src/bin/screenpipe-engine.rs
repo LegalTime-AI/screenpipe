@@ -1000,19 +1000,18 @@ async fn main() -> anyhow::Result<()> {
     // Create UI recorder config early before cli is moved
     let ui_recorder_config = config.to_ui_recorder_config();
 
-    // Meeting detection uses app focus + audio RMS only (no transcription needed).
-    // It still needs audio capture enabled; otherwise the UI scanner has no useful
-    // consumer and can add idle CPU.
-    let meeting_detector: Option<Arc<MeetingDetector>> = if config.disable_audio {
-        info!("meeting detector disabled because audio capture is disabled");
-        None
-    } else if config.disable_meeting_detector {
-        info!("meeting detector disabled via --disable-meeting-detector");
-        None
-    } else {
+    // OS process/microphone ownership detection does not record audio. LegalTime
+    // consumes these durable occurrences from its screen-only process and owns
+    // transcription in a separate, meeting-scoped child.
+    let meeting_detector: Option<Arc<MeetingDetector>> = if record_args
+        .meeting_detection_enabled(config.disable_audio, config.disable_meeting_detector)
+    {
         let detector = Arc::new(MeetingDetector::new());
-        info!("meeting detector enabled — independent of transcription mode");
+        info!("meeting detector enabled — independent of audio recording");
         Some(detector)
+    } else {
+        info!("meeting detector disabled by recording policy");
+        None
     };
 
     let mut audio_manager_builder = config.to_audio_manager_builder(
@@ -1829,7 +1828,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Start v2 meeting detection (UI scanning for call controls) when audio is enabled.
+    // Start OS meeting detection independently of the audio recording loop.
     let _meeting_watcher_handle = if let Some(meeting_detector) = meeting_detector.clone() {
         let v2_in_meeting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         Some(start_meeting_watcher(
@@ -1843,7 +1842,7 @@ async fn main() -> anyhow::Result<()> {
             config.uia_passive_apps.clone(),
         ))
     } else {
-        info!("meeting watcher skipped because audio capture is disabled");
+        info!("meeting watcher skipped because meeting detection is disabled");
         None
     };
 

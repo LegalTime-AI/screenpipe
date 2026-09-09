@@ -370,3 +370,7 @@ Built by screenpipe (Mediar, Inc.). Founded 2024. Based in San Francisco, CA.
 - Email: louis@screenpi.pe
 
 </details>
+
+### LegalTime screen-only call detection
+
+LegalTime launches `record --disable-audio --detect-meetings-without-audio --disable-pipes`. The explicit detector opt-in writes OS call occurrences while audio recording remains disabled; the separate meeting-scoped LegalTime process owns transcription. `--disable-meeting-detector` still disables detection.
