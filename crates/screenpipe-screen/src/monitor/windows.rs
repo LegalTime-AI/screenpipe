@@ -33,8 +33,9 @@ impl SafeMonitor {
         }
     }
 
-    // Windows: Use persistent WGC capture to avoid orange border flash.
-    // Falls back to per-frame xcap capture if persistent session fails.
+    // Windows: Prefer persistent DXGI duplication so WGC cannot force a
+    // software cursor on the physical display. If duplication is unavailable,
+    // use per-frame xcap rather than holding a WGC session.
     pub async fn capture_image(&self) -> Result<DynamicImage> {
         let monitor_id = self.monitor_id;
         let persistent = self.persistent_capture.clone();
@@ -50,7 +51,7 @@ impl SafeMonitor {
                 let guard = persistent
                     .lock()
                     .map_err(|e| anyhow::anyhow!("persistent capture mutex poisoned: {}", e))?;
-                if let Some(ref capture) = *guard {
+                if let Some(ref mut capture) = *guard {
                     match capture.get_latest_image(std::time::Duration::from_millis(200)) {
                         Ok(img) => {
                             persistent_failures.store(0, Ordering::Relaxed);
@@ -77,9 +78,9 @@ impl SafeMonitor {
                 }
             }
 
-            match crate::wgc_capture::PersistentCapture::new(monitor_id) {
+            match crate::persistent_capture::PersistentSession::new(monitor_id) {
                 Ok(mut capture) => {
-                    // First frame — allow longer timeout for WGC to deliver
+                    // First frame — allow longer timeout for DXGI/WGC to deliver
                     match capture.get_latest_image(std::time::Duration::from_millis(500)) {
                         Ok(img) => {
                             let mut guard = persistent.lock().map_err(|e| {
@@ -196,7 +197,8 @@ impl SafeMonitor {
             if let Some(mut capture) = guard.take() {
                 capture.stop();
                 tracing::info!(
-                    "released persistent WGC session for monitor {}",
+                    "released persistent {} session for monitor {}",
+                    capture.backend_name(),
                     self.monitor_id
                 );
             }
@@ -209,7 +211,7 @@ impl SafeMonitor {
 
     fn record_persistent_init_failure(
         monitor_id: u32,
-        persistent: &std::sync::Mutex<Option<crate::wgc_capture::PersistentCapture>>,
+        persistent: &std::sync::Mutex<Option<crate::persistent_capture::PersistentSession>>,
         persistent_disabled: &Arc<AtomicBool>,
         persistent_failures: &Arc<AtomicU32>,
         reason: &str,
@@ -233,7 +235,7 @@ impl SafeMonitor {
                 if let Some(mut capture) = guard.take() {
                     capture.stop();
                     tracing::warn!(
-                        "stopped concurrently stored persistent WGC session for monitor {} after disable",
+                        "stopped concurrently stored persistent capture session for monitor {} after disable",
                         monitor_id
                     );
                 }
@@ -319,7 +321,7 @@ pub fn is_screen_capture_supported() -> bool {
 
 /// Get the screen capture backend being used
 pub fn get_capture_backend() -> &'static str {
-    "xcap"
+    "dxgi"
 }
 
 #[cfg(test)]
@@ -328,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_persistent_capture_disables_after_three_failures() {
-        let persistent: std::sync::Mutex<Option<crate::wgc_capture::PersistentCapture>> =
+        let persistent: std::sync::Mutex<Option<crate::persistent_capture::PersistentSession>> =
             std::sync::Mutex::new(None);
         let disabled = Arc::new(AtomicBool::new(false));
         let failures = Arc::new(AtomicU32::new(0));

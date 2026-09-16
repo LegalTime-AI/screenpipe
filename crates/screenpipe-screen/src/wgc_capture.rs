@@ -326,7 +326,7 @@ extern "system" fn monitor_enum_proc(
 /// Resolve a live `HMONITOR` for `monitor_id` (xcap's monitor id is `HMONITOR.0 as u32`).
 /// Re-enumerating (rather than reconstructing the pointer from the id) makes sure the
 /// handle is still valid right now, matching how the rest of this crate resolves ids.
-fn find_hmonitor(monitor_id: u32) -> Result<HMONITOR> {
+pub(crate) fn find_hmonitor(monitor_id: u32) -> Result<HMONITOR> {
     let mut monitors: Vec<HMONITOR> = Vec::new();
     unsafe {
         EnumDisplayMonitors(

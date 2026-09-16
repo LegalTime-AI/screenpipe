@@ -11,6 +11,10 @@ pub mod frame_comparison;
 pub mod microsoft;
 pub mod monitor;
 #[cfg(target_os = "windows")]
+pub mod dxgi_capture;
+#[cfg(target_os = "windows")]
+pub mod persistent_capture;
+#[cfg(target_os = "windows")]
 pub mod wgc_capture;
 #[cfg(target_os = "macos")]
 pub use monitor::HdCapture;
