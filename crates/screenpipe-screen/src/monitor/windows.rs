@@ -48,7 +48,7 @@ impl SafeMonitor {
 
             // Try existing persistent session
             {
-                let guard = persistent
+                let mut guard = persistent
                     .lock()
                     .map_err(|e| anyhow::anyhow!("persistent capture mutex poisoned: {}", e))?;
                 if let Some(ref mut capture) = *guard {

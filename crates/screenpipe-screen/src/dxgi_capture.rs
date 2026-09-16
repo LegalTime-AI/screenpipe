@@ -30,10 +30,10 @@ use windows::{
             Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL},
             Direct3D11::{
                 D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
-                ID3D11Resource, ID3D11Texture2D, D3D11_BIND_FLAG, D3D11_BIND_SHADER_RESOURCE,
-                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-                D3D11_MAP_READ, D3D11_RESOURCE_MISC_FLAG, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-                D3D11_USAGE, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+                ID3D11Resource, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+                D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
+                D3D11_USAGE_STAGING,
             },
             Dxgi::{
                 CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
@@ -114,11 +114,14 @@ impl DxgiPersistentCapture {
             }
         }
 
-        let (texture, width, height) = self
-            .cached
-            .as_ref()
-            .ok_or_else(|| anyhow!("DXGI duplication has no cached frame"))?;
-        self.readback(texture, *width, *height)
+        let (texture, width, height) = {
+            let cached = self
+                .cached
+                .as_ref()
+                .ok_or_else(|| anyhow!("DXGI duplication has no cached frame"))?;
+            (cached.0.clone(), cached.1, cached.2)
+        };
+        self.readback(&texture, width, height)
     }
 
     pub fn stop(&mut self) {
@@ -398,13 +401,9 @@ fn create_texture_like(
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
     desc.Usage = usage;
-    desc.BindFlags = if usage == D3D11_USAGE_DEFAULT {
-        D3D11_BIND_SHADER_RESOURCE
-    } else {
-        D3D11_BIND_FLAG(0)
-    };
+    desc.BindFlags = 0;
     desc.CPUAccessFlags = cpu_access_flags;
-    desc.MiscFlags = D3D11_RESOURCE_MISC_FLAG(0);
+    desc.MiscFlags = 0;
 
     let mut texture = None;
     unsafe {
