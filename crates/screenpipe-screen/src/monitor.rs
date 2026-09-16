@@ -100,10 +100,11 @@ pub struct SafeMonitor {
     /// Monitor IDs are stable during a session, so we try the cached index first (O(1)).
     #[cfg(not(target_os = "macos"))]
     cached_monitor_index: Arc<std::sync::Mutex<Option<usize>>>,
-    /// Persistent WGC capture session to avoid orange border flash from per-frame session lifecycle.
-    /// Lazy-initialized on first capture_image() call.
+    /// Persistent DXGI session when duplication is available. DXGI keeps the
+    /// hardware cursor; WGC is not held open (diagnostic `SCREENPIPE_FORCE_WGC`
+    /// only). Lazy-initialized on first capture_image().
     #[cfg(target_os = "windows")]
-    persistent_capture: Arc<std::sync::Mutex<Option<crate::wgc_capture::PersistentCapture>>>,
+    persistent_capture: Arc<std::sync::Mutex<Option<crate::persistent_capture::PersistentSession>>>,
     /// If true, skip persistent capture and use per-frame fallback for this session.
     #[cfg(target_os = "windows")]
     persistent_capture_disabled: Arc<AtomicBool>,
