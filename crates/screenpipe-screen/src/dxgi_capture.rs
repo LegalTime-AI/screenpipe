@@ -37,8 +37,8 @@ use windows::{
             },
             Dxgi::{
                 CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-                IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND,
-                DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+                IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST,
+                DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
             },
             Gdi::HMONITOR,
         },
@@ -184,7 +184,12 @@ impl DxgiPersistentCapture {
         Ok(())
     }
 
-    fn readback(&mut self, texture: &ID3D11Texture2D, width: u32, height: u32) -> Result<DynamicImage> {
+    fn readback(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+    ) -> Result<DynamicImage> {
         let row_bytes = width as usize * 4;
         let mut rgba = vec![0u8; row_bytes * height as usize];
 
@@ -300,8 +305,8 @@ fn map_duplication_error(err: windows::core::Error) -> anyhow::Error {
 fn open_duplication(
     h_monitor: HMONITOR,
 ) -> Result<(ID3D11Device, ID3D11DeviceContext, IDXGIOutputDuplication)> {
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
-        .map_err(|e| anyhow!("CreateDXGIFactory1 failed: {}", e))?;
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.map_err(|e| anyhow!("CreateDXGIFactory1 failed: {}", e))?;
 
     let mut adapter_index = 0u32;
     loop {
@@ -372,7 +377,10 @@ fn duplicate_output(
         .cast()
         .map_err(|e| anyhow!("cast IDXGIOutput to IDXGIOutput1 failed: {}", e))?;
     let duplication = unsafe { output1.DuplicateOutput(&device) }.map_err(|e| {
-        anyhow!("DuplicateOutput failed (typical on RDP/VMs; WGC will be used): {}", e)
+        anyhow!(
+            "DuplicateOutput failed (typical on RDP/VMs; per-frame capture will be used): {}",
+            e
+        )
     })?;
 
     Ok((device, context, duplication))

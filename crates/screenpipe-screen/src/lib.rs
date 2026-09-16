@@ -6,12 +6,12 @@
 pub mod apple;
 pub mod core;
 pub mod custom_ocr;
+#[cfg(target_os = "windows")]
+pub mod dxgi_capture;
 pub mod frame_comparison;
 #[cfg(any(target_os = "windows", test))]
 pub mod microsoft;
 pub mod monitor;
-#[cfg(target_os = "windows")]
-pub mod dxgi_capture;
 #[cfg(target_os = "windows")]
 pub mod persistent_capture;
 #[cfg(target_os = "windows")]
