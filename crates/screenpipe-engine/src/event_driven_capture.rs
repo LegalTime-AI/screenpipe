@@ -832,7 +832,10 @@ pub async fn event_driven_capture_loop(
                 None, // first capture — no elements ref
                 &mut walk_budget,
                 &mut ocr_gate,
-                false, // screenshot enabled on startup
+                // Honor --disable-screenshots on the first frame. Hardcoding
+                // false here used to open a leftover native 2fps SCStream per
+                // display that a11y-only mode never released.
+                screenshot_disabled,
                 false, // hd not active at startup (Manual is dedup-exempt anyway)
                 false, // not in a meeting at startup
                 focus_controller.monitor_hosts_focus(&monitor),
@@ -1178,6 +1181,10 @@ pub async fn event_driven_capture_loop(
                         "screenshots disabled for monitor {} (power profile {:?}, managed/config={}) — a11y walk continues",
                         monitor_id, profile.name, screenshots_disabled_by_config
                     );
+                    // Startup capture used to hardcode screenshots on, which
+                    // left a native 2fps SCStream running after this flag
+                    // flipped. Drop that handle so WindowServer/replayd stop.
+                    monitor.release_capture_stream();
                 }
             }
         }
