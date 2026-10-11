@@ -229,7 +229,16 @@ fn setup_logging(
         );
 
     #[cfg(target_os = "macos")]
-    let tracing_registry = tracing_registry.with(OsLogger::new("pe.screenpi", "server"));
+    // The unified-log layer gets the same filter as the stdout/file layers.
+    // Unfiltered, it received every TRACE/DEBUG event in the process, including
+    // ort's `DROP Environment` debug event emitted from a static destructor
+    // during exit(). By then macOS has torn down the main thread's TLS, the
+    // registry's span-stack lookup panics (std thread/local.rs:429), and a
+    // panic inside exit() can only abort. LegalTime stops the meeting-audio
+    // engine with SIGINT, so every meeting end on a Mac ended in SIGABRT
+    // (LegalTime Sentry LEGALTIME-MAIN-5V / MAIN-2R).
+    let tracing_registry = tracing_registry
+        .with(OsLogger::new("pe.screenpi", "server").with_filter(make_env_filter()));
 
     #[cfg(feature = "debug-console")]
     let tracing_registry = tracing_registry.with(
