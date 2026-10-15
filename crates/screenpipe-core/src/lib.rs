@@ -8,6 +8,7 @@ pub mod memories;
 pub mod paths;
 pub mod permissions;
 pub mod pipes;
+pub mod osascript;
 pub mod strings;
 pub mod thread_priority;
 pub mod window_pattern;
