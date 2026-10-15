@@ -182,10 +182,15 @@ impl MacOSUrlDetector {
     set u to URL of active tab of front window
     return t & "|||" & u
 end tell"#;
-        let output = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()?;
+        let output = match screenpipe_core::osascript::osascript(script) {
+            Ok(o) => o,
+            // Timed out / skipped after a timeout: same as a failed script.
+            Err(e) if screenpipe_core::osascript::is_timeout(&e) => {
+                debug!("browser_url: osascript {}", e);
+                return Ok(Default::default());
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if output.status.success() {
             let raw = String::from_utf8(output.stdout)?.trim().to_string();
@@ -199,10 +204,15 @@ end tell"#;
     }
 
     fn get_url_via_applescript(&self, script: &str) -> Result<Option<String>> {
-        let output = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()?;
+        let output = match screenpipe_core::osascript::osascript(script) {
+            Ok(o) => o,
+            // Timed out / skipped after a timeout: same as a failed script.
+            Err(e) if screenpipe_core::osascript::is_timeout(&e) => {
+                debug!("browser_url: osascript {}", e);
+                return Ok(Default::default());
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if output.status.success() {
             let url = String::from_utf8(output.stdout)?.trim().to_string();
@@ -263,10 +273,15 @@ end tell"#;
     end repeat
     return out
 end tell"#;
-        let output = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()?;
+        let output = match screenpipe_core::osascript::osascript(script) {
+            Ok(o) => o,
+            // Timed out / skipped after a timeout: same as a failed script.
+            Err(e) if screenpipe_core::osascript::is_timeout(&e) => {
+                debug!("browser_url: osascript {}", e);
+                return Ok(Default::default());
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if !output.status.success() {
             return Ok(Vec::new());
@@ -299,10 +314,15 @@ end tell"#;
     end repeat
     return out
 end tell"#;
-        let output = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()?;
+        let output = match screenpipe_core::osascript::osascript(script) {
+            Ok(o) => o,
+            // Timed out / skipped after a timeout: same as a failed script.
+            Err(e) if screenpipe_core::osascript::is_timeout(&e) => {
+                debug!("browser_url: osascript {}", e);
+                return Ok(Default::default());
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if !output.status.success() {
             return Ok(Vec::new());

@@ -15,7 +15,6 @@ use cidre::{arc, arc::Retained, ax, cf, ns};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -207,7 +206,7 @@ fn extract_browser_url(
 fn get_arc_url() -> Option<String> {
     let script = r#"tell application "Arc" to return URL of active tab of front window"#;
 
-    let output = match Command::new("osascript").arg("-e").arg(script).output() {
+    let output = match screenpipe_core::osascript::osascript(script) {
         Ok(o) => o,
         Err(e) => {
             debug!("get_arc_url: osascript spawn failed: {}", e);

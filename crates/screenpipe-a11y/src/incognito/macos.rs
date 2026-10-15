@@ -17,7 +17,6 @@
 //! detection via [`super::titles::is_title_private`].
 
 use std::collections::HashSet;
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -119,7 +118,7 @@ end if"#,
             name = as_name,
         );
 
-        let output = match Command::new("osascript").arg("-e").arg(&script).output() {
+        let output = match screenpipe_core::osascript::osascript(&script) {
             Ok(o) => o,
             Err(e) => {
                 debug!("incognito: osascript spawn failed for {}: {}", as_name, e);
