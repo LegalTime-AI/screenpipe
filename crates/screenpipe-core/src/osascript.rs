@@ -90,6 +90,12 @@ pub fn script_target(script: &str) -> String {
     String::new()
 }
 
+/// True for a run killed at the limit or skipped during a cooldown; callers
+/// treat it exactly like a script that failed.
+pub fn is_timeout(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
+}
+
 /// `osascript -e <script>` with the time limit and per-app cooldown.
 pub fn osascript(script: &str) -> io::Result<Output> {
     run_guarded(script, OSASCRIPT_TIMEOUT, OSASCRIPT_COOLDOWN, || {
