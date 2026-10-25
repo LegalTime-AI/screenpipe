@@ -7,6 +7,58 @@ use anyhow::{Error, Result};
 use image::DynamicImage;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// First and longest wait between persistent-capture retries after a
+/// transient init failure. The fallback per-frame capture runs meanwhile.
+const TRANSIENT_RETRY_MIN: Duration = Duration::from_secs(1);
+const TRANSIENT_RETRY_MAX: Duration = Duration::from_secs(15);
+
+/// Desktop-not-capturable-right-now failures: the lock/secure desktop or the
+/// desktop switch around wake/unlock refuses duplication (access denied),
+/// revokes it (access lost), or the first frame does not arrive in time.
+/// These are normal lifecycle states, not a broken backend, so they must
+/// never switch persistent capture off for the session (LegalTime: DXGI
+/// access_denied preceded 39 of 98 multi-minute capture outages).
+pub(crate) fn is_transient_init_failure(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("access is denied")
+        || r.contains("0x80070005")
+        || r.contains("e_accessdenied")
+        || r.contains("access_denied")
+        || r.contains("0x887a002b")
+        || r.contains("access lost")
+        || r.contains("access_lost")
+        || r.contains("0x887a0026")
+        || r.contains("no dxgi frame received")
+}
+
+/// Retry spacing for transient init failures. Never disables anything.
+#[derive(Debug, Default)]
+pub(crate) struct TransientRetry {
+    consecutive: u32,
+    next_attempt: Option<Instant>,
+}
+
+impl TransientRetry {
+    pub(crate) fn may_try(&self, now: Instant) -> bool {
+        self.next_attempt.map_or(true, |t| now >= t)
+    }
+
+    /// Records a transient failure and returns the wait before the next try.
+    pub(crate) fn record(&mut self, now: Instant) -> Duration {
+        self.consecutive = self.consecutive.saturating_add(1);
+        let shift = (self.consecutive - 1).min(4);
+        let wait = (TRANSIENT_RETRY_MIN * (1u32 << shift)).min(TRANSIENT_RETRY_MAX);
+        self.next_attempt = Some(now + wait);
+        wait
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.consecutive = 0;
+        self.next_attempt = None;
+    }
+}
 
 impl SafeMonitor {
     // Windows: Create from xcap monitor
@@ -30,6 +82,7 @@ impl SafeMonitor {
             persistent_capture: Arc::new(std::sync::Mutex::new(None)),
             persistent_capture_disabled: Arc::new(AtomicBool::new(false)),
             persistent_capture_failures: Arc::new(AtomicU32::new(0)),
+            persistent_transient: Arc::new(std::sync::Mutex::new(TransientRetry::default())),
         }
     }
 
@@ -41,6 +94,7 @@ impl SafeMonitor {
         let persistent = self.persistent_capture.clone();
         let persistent_disabled = self.persistent_capture_disabled.clone();
         let persistent_failures = self.persistent_capture_failures.clone();
+        let transient = self.persistent_transient.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<DynamicImage> {
             if persistent_disabled.load(Ordering::Relaxed) {
                 return Self::per_frame_capture(monitor_id);
@@ -78,6 +132,16 @@ impl SafeMonitor {
                 }
             }
 
+            // A transient failure (locked/secure desktop) waits out a short
+            // backoff before re-creating duplication; per-frame covers the gap.
+            let may_try = transient
+                .lock()
+                .map(|t| t.may_try(Instant::now()))
+                .unwrap_or(true);
+            if !may_try {
+                return Self::per_frame_capture(monitor_id);
+            }
+
             match crate::persistent_capture::PersistentSession::new(monitor_id) {
                 Ok(mut capture) => {
                     // First frame — allow longer timeout for DXGI/WGC to deliver
@@ -98,6 +162,9 @@ impl SafeMonitor {
                             }
                             *guard = Some(capture);
                             persistent_failures.store(0, Ordering::Relaxed);
+                            if let Ok(mut t) = transient.lock() {
+                                t.reset();
+                            }
                             return Ok(img);
                         }
                         Err(e) => {
@@ -106,6 +173,7 @@ impl SafeMonitor {
                                 &persistent,
                                 &persistent_disabled,
                                 &persistent_failures,
+                                &transient,
                                 &e.to_string(),
                             );
                             // capture dropped here, session cleaned up
@@ -118,6 +186,7 @@ impl SafeMonitor {
                         &persistent,
                         &persistent_disabled,
                         &persistent_failures,
+                        &transient,
                         &e.to_string(),
                     );
                 }
@@ -161,6 +230,9 @@ impl SafeMonitor {
         self.persistent_capture_disabled
             .store(false, Ordering::Relaxed);
         self.persistent_capture_failures.store(0, Ordering::Relaxed);
+        if let Ok(mut t) = self.persistent_transient.lock() {
+            t.reset();
+        }
 
         let monitor_id = self.monitor_id;
 
@@ -214,8 +286,22 @@ impl SafeMonitor {
         persistent: &std::sync::Mutex<Option<crate::persistent_capture::PersistentSession>>,
         persistent_disabled: &Arc<AtomicBool>,
         persistent_failures: &Arc<AtomicU32>,
+        transient: &std::sync::Mutex<TransientRetry>,
         reason: &str,
     ) {
+        if is_transient_init_failure(reason) {
+            let wait = transient
+                .lock()
+                .map(|mut t| t.record(Instant::now()))
+                .unwrap_or(TRANSIENT_RETRY_MIN);
+            tracing::debug!(
+                "persistent capture init refused for monitor {} (desktop not capturable right now, retry in {:?}; never disables): {}",
+                monitor_id,
+                wait,
+                reason
+            );
+            return;
+        }
         let failures = persistent_failures.fetch_add(1, Ordering::Relaxed) + 1;
         if failures >= 3 {
             if !persistent_disabled.swap(true, Ordering::Relaxed) {
@@ -334,16 +420,17 @@ mod tests {
             std::sync::Mutex::new(None);
         let disabled = Arc::new(AtomicBool::new(false));
         let failures = Arc::new(AtomicU32::new(0));
+        let transient = std::sync::Mutex::new(TransientRetry::default());
 
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, "err 1");
+        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 1");
         assert!(!disabled.load(Ordering::Relaxed));
         assert_eq!(failures.load(Ordering::Relaxed), 1);
 
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, "err 2");
+        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 2");
         assert!(!disabled.load(Ordering::Relaxed));
         assert_eq!(failures.load(Ordering::Relaxed), 2);
 
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, "err 3");
+        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 3");
         assert!(disabled.load(Ordering::Relaxed));
         assert_eq!(failures.load(Ordering::Relaxed), 3);
         // Disable must also drain any stored session (race: a concurrent
@@ -351,8 +438,63 @@ mod tests {
         assert!(persistent.lock().unwrap().is_none());
 
         // Further failures after disable must not panic or re-log; drain stays idempotent.
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, "err 4");
+        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 4");
         assert!(disabled.load(Ordering::Relaxed));
         assert!(persistent.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_access_denied_never_disables_persistent_capture() {
+        let persistent: std::sync::Mutex<Option<crate::persistent_capture::PersistentSession>> =
+            std::sync::Mutex::new(None);
+        let disabled = Arc::new(AtomicBool::new(false));
+        let failures = Arc::new(AtomicU32::new(0));
+        let transient = std::sync::Mutex::new(TransientRetry::default());
+        let reasons = [
+            "DuplicateOutput failed (typical on RDP/VMs; per-frame capture will be used): Access is denied. (0x80070005)",
+            "DXGI duplication access lost: DXGI_ERROR_ACCESS_LOST",
+            "no DXGI frame received within 500ms",
+            "DuplicateOutput failed: E_ACCESSDENIED",
+        ];
+        for i in 0..50 {
+            SafeMonitor::record_persistent_init_failure(
+                1, &persistent, &disabled, &failures, &transient, reasons[i % reasons.len()],
+            );
+        }
+        assert!(!disabled.load(Ordering::Relaxed), "a locked/secure desktop must never disable DXGI");
+        assert_eq!(failures.load(Ordering::Relaxed), 0);
+        // A real backend failure still counts after transient ones.
+        for i in 0..3 {
+            SafeMonitor::record_persistent_init_failure(
+                1, &persistent, &disabled, &failures, &transient, &format!("DXGI_ERROR_UNSUPPORTED {i}"),
+            );
+        }
+        assert!(disabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_transient_retry_backoff_is_capped_and_resets() {
+        let mut t = TransientRetry::default();
+        let now = Instant::now();
+        assert!(t.may_try(now));
+        assert_eq!(t.record(now), Duration::from_secs(1));
+        assert!(!t.may_try(now));
+        assert!(t.may_try(now + Duration::from_secs(1)));
+        assert_eq!(t.record(now), Duration::from_secs(2));
+        assert_eq!(t.record(now), Duration::from_secs(4));
+        assert_eq!(t.record(now), Duration::from_secs(8));
+        assert_eq!(t.record(now), Duration::from_secs(15));
+        assert_eq!(t.record(now), Duration::from_secs(15));
+        t.reset();
+        assert!(t.may_try(now));
+        assert_eq!(t.record(now), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_transient_classification() {
+        assert!(is_transient_init_failure("Access is denied. (0x80070005)"));
+        assert!(is_transient_init_failure("DXGI duplication access lost: x"));
+        assert!(!is_transient_init_failure("DuplicateOutput failed: The request is not supported. (0x887A0004)"));
+        assert!(!is_transient_init_failure("D3D11CreateDevice for DXGI adapter failed: x"));
     }
 }
