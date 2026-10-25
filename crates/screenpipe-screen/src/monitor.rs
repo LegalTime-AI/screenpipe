@@ -111,6 +111,11 @@ pub struct SafeMonitor {
     /// Consecutive persistent init failures for this monitor.
     #[cfg(target_os = "windows")]
     persistent_capture_failures: Arc<AtomicU32>,
+    /// Retry gate for transient init failures (desktop not capturable right
+    /// now: lock/secure desktop, desktop switch after wake). These never count
+    /// toward `persistent_capture_disabled`; they only space out retries.
+    #[cfg(target_os = "windows")]
+    persistent_transient: Arc<std::sync::Mutex<crate::monitor::windows::TransientRetry>>,
 }
 
 #[derive(Clone, Debug)]
@@ -227,6 +232,8 @@ mod tests {
             persistent_capture_disabled: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "windows")]
             persistent_capture_failures: Arc::new(AtomicU32::new(0)),
+            #[cfg(target_os = "windows")]
+            persistent_transient: Arc::new(std::sync::Mutex::new(Default::default())),
         }
     }
 
