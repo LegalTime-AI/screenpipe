@@ -411,6 +411,7 @@ impl TranscriptionEngine {
                 .map_err(|e| anyhow!("failed to load whisper model: {}", e))?;
 
                 info!("whisper model loaded successfully");
+                screenpipe_core::mem_trace::checkpoint("whisper:context_loaded");
                 // NOTE: do NOT call whisper_rs::install_logging_hooks() here.
                 // It redirects ggml/whisper logs into Rust's tracing subscriber via
                 // a global FFI callback. During app restart (process::exit), C++ static

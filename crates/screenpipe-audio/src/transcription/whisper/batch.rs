@@ -97,7 +97,13 @@ fn transcribe_sync(
         audio.resize(16000, 0.0);
     }
 
-    params.set_n_threads(2);
+    params.set_n_threads(
+        std::env::var("SCREENPIPE_WHISPER_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .filter(|n| (1..=16).contains(n))
+            .unwrap_or(2),
+    );
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -115,8 +121,11 @@ fn transcribe_sync(
     // Log-probability threshold: low-confidence segments are dropped
     params.set_logprob_thold(-2.0);
 
+    screenpipe_core::mem_trace::checkpoint("whisper:before_mel");
     whisper_state.pcm_to_mel(&audio, 2)?;
+    screenpipe_core::mem_trace::checkpoint("whisper:mel");
     let (_, lang_tokens) = whisper_state.lang_detect(0, 2)?;
+    screenpipe_core::mem_trace::checkpoint("whisper:lang_detect");
     let lang = detect_language(lang_tokens, languages);
     params.set_language(lang);
     params.set_debug_mode(false);
@@ -134,6 +143,7 @@ fn transcribe_sync(
     whisper_state
         .full(params, &audio)
         .map_err(|e| anyhow::anyhow!("failed to run whisper model: {}", e))?;
+    screenpipe_core::mem_trace::checkpoint("whisper:full");
 
     let num_segments = whisper_state.full_n_segments();
 

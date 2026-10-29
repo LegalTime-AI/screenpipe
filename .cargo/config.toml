@@ -18,6 +18,13 @@ rustflags = "-lc++ -l framework=Accelerate"
 # Use prebuilt NASM objects on Windows (no NASM install needed in CI): https://aws.github.io/aws-lc-rs/requirements/windows.html#prebuilt-nasm-objects
 AWS_LC_SYS_PREBUILT_NASM = "1"
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# MSVC only (cl.exe reads CL; clang/gcc ignore it). ggml's backend scheduler
+# mallocs graph_size * GGML_SCHED_MAX_SPLIT_INPUTS(30) * 2 * sizeof(ggml_tensor)
+# per scheduler: whisper.cpp builds 4 schedulers per state with graph_size 4096,
+# i.e. ~4 x 87 MB = ~350 MB of committed private memory that a CPU-only build
+# never touches (splits only get inputs when a graph spans 2+ backends, and the
+# Windows build has just the CPU backend). 4 keeps headroom and drops it to ~45 MB.
+CL = "/DGGML_SCHED_MAX_SPLIT_INPUTS=4"
 
 # Faster builds - use more threads for codegen
 [build]
