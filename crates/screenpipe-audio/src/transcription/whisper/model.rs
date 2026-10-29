@@ -75,5 +75,17 @@ pub fn create_whisper_context_parameters<'a>(
     // and DTW can be re-enabled after the upstream issue is addressed.
     context_param.dtw_parameters.mode = whisper_rs::DtwMode::None;
 
+    // Measurement toggles (LegalTime post-call memory work). Unset = unchanged.
+    if let Ok(v) = std::env::var("SCREENPIPE_WHISPER_FLASH_ATTN") {
+        let on = v == "1" || v.eq_ignore_ascii_case("true");
+        context_param.flash_attn(on);
+        info!("whisper context: flash_attn={} (SCREENPIPE_WHISPER_FLASH_ATTN)", on);
+    }
+    if let Ok(v) = std::env::var("SCREENPIPE_WHISPER_GPU") {
+        let on = v == "1" || v.eq_ignore_ascii_case("true");
+        context_param.use_gpu(on);
+        info!("whisper context: use_gpu={} (SCREENPIPE_WHISPER_GPU)", on);
+    }
+
     Ok(context_param)
 }

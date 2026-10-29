@@ -264,6 +264,7 @@ pub async fn retranscribe_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RetranscribeRequest>,
 ) -> Response {
+    screenpipe_core::mem_trace::checkpoint("retranscribe:start");
     // 1. Query audio chunks — by explicit IDs (preferred) or time range (fallback)
     let chunks = if let Some(ref ids) = request.audio_chunk_ids {
         info!("retranscribe request: {} explicit chunk IDs", ids.len());
@@ -366,6 +367,7 @@ pub async fn retranscribe_handler(
         }
     };
 
+    screenpipe_core::mem_trace::checkpoint("retranscribe:engine_loaded");
     // 4. Process each chunk
     let mut results = Vec::new();
     let mut processed = 0;
@@ -400,6 +402,7 @@ pub async fn retranscribe_handler(
         if samples.is_empty() {
             continue;
         }
+        screenpipe_core::mem_trace::checkpoint("retranscribe:chunk_decoded");
 
         // Create a session per chunk
         let mut session = match transcription_engine.create_session() {
@@ -410,6 +413,8 @@ pub async fn retranscribe_handler(
             }
         };
 
+        screenpipe_core::mem_trace::checkpoint("retranscribe:session_created");
+
         let device_name = chunk.device.as_deref().unwrap_or("unknown");
         let transcription = match session.transcribe(&samples, sample_rate, device_name).await {
             Ok(text) => text,
@@ -418,6 +423,9 @@ pub async fn retranscribe_handler(
                 continue;
             }
         };
+        screenpipe_core::mem_trace::checkpoint("retranscribe:chunk_transcribed");
+        drop(session);
+        screenpipe_core::mem_trace::checkpoint("retranscribe:session_dropped");
 
         // Update DB — replace all existing transcription rows for this chunk
         let old_text = chunk.transcription.clone();
@@ -454,6 +462,8 @@ pub async fn retranscribe_handler(
         processed += 1;
     }
 
+    drop(transcription_engine);
+    screenpipe_core::mem_trace::checkpoint("retranscribe:engine_dropped");
     info!(
         "retranscribe complete: {} chunks processed, {} transcription results",
         processed,

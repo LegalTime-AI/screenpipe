@@ -765,6 +765,7 @@ async fn main() -> anyhow::Result<()> {
         }));
     }
 
+    screenpipe_core::mem_trace::checkpoint("startup:begin");
     // Only require ffmpeg when audio recording is enabled. Vision-only recording
     // should not attempt network installs (important for offline / locked-down
     // Windows environments).
@@ -935,6 +936,7 @@ async fn main() -> anyhow::Result<()> {
         })?,
     );
 
+    screenpipe_core::mem_trace::checkpoint("startup:db_ready");
     // Start sleep/wake monitor for telemetry (macOS only)
     // This tracks sleep/wake events and checks if recording is degraded after wake
     // NOTE: must be started AFTER database init — the monitor spawns background
@@ -1036,6 +1038,7 @@ async fn main() -> anyhow::Result<()> {
     // Created BEFORE audio manager so we can wire up the transcription callback.
     let hot_frame_cache = Arc::new(HotFrameCache::new());
 
+    screenpipe_core::mem_trace::checkpoint("startup:before_audio_manager");
     let audio_manager = match audio_manager_builder.build(db.clone()).await {
         Ok(mut manager) => {
             // Wire up audio → hot cache: push new transcriptions so the WS
@@ -1266,6 +1269,7 @@ async fn main() -> anyhow::Result<()> {
 
     let local_data_dir_clone_2 = local_data_dir_clone.clone();
 
+    screenpipe_core::mem_trace::checkpoint("startup:after_vision");
     // Shared manual meeting lock — bridges the HTTP meeting routes and the meeting persister
     // so a manually-started meeting suppresses auto-detection transitions.
     let manual_meeting: std::sync::Arc<tokio::sync::RwLock<Option<i64>>> =
@@ -1811,9 +1815,20 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Start UI event recording (database recording of accessibility events)
+    screenpipe_core::mem_trace::checkpoint("startup:before_ui_recorder");
+    // Start UI event recording (database recording of accessibility events).
+    // A transcribe-only instance (--disable-vision AND --disable-audio, e.g.
+    // LegalTime's post-call transcriber that only serves /audio/retranscribe)
+    // has no capture to trigger and no frames to link, so the input hooks and
+    // accessibility tree walker are pure overhead (memory + CPU) there.
+    let transcribe_only = config.disable_vision
+        && config.disable_audio
+        && std::env::var("SCREENPIPE_TRANSCRIBE_ONLY_LEGACY").as_deref() != Ok("1");
     let ui_recorder_handle = {
-        if ui_recorder_config.enabled {
+        if transcribe_only {
+            info!("UI event capture skipped: transcribe-only instance (vision and audio disabled)");
+            None
+        } else if ui_recorder_config.enabled {
             info!("starting UI event capture");
             match start_ui_recording(
                 db.clone(),
@@ -1857,6 +1872,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Start calendar-assisted speaker identification
     let _speaker_id_handle = start_speaker_identification(db.clone(), config.user_name.clone());
+    screenpipe_core::mem_trace::checkpoint("startup:after_ui_recorder");
+    if std::env::var("SCREENPIPE_MEMTRACE").as_deref() == Ok("1") {
+        tokio::spawn(async {
+            for (wait, secs) in [(5u64, 5u64), (10, 15), (15, 30)] {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                screenpipe_core::mem_trace::checkpoint(&format!("startup:settled_{}s", secs));
+            }
+        });
+    }
 
     // WAL checkpoint maintenance now starts inside DatabaseManager::new(), so
     // every caller (CLI + in-process desktop app) gets it — no explicit call here.
