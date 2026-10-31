@@ -51,15 +51,15 @@ pub mod macos_version {
     /// Check if we should use sck-rs (ScreenCaptureKit) for monitor listing,
     /// monitor screenshots and per-window capture.
     ///
-    /// ScreenCaptureKit exists from macOS 12.3, but on macOS 13 it hangs this
-    /// engine: verified on a macOS 13.3.1 VM (2026-10-30), `SckMonitor::all()`
-    /// -> `SCShareableContent::current()` never completes, so the first
-    /// monitor listing blocks startup forever and the HTTP API never binds
-    /// (LegalTime LEG-373: macOS 12.7.6 Intel and 13.3.1 Apple Silicon
-    /// customers). sck-rs window capture and its one-shot monitor fallback also
-    /// call `SCScreenshotManager`, which macOS 13's ScreenCaptureKit does not
-    /// have at all (added in 14.0). Below 14 use the xcap (CoreGraphics) path,
-    /// which the same VM test showed starting in ~5 s and saving real frames.
+    /// ScreenCaptureKit exists from macOS 12.3, but on macOS 13.3.1 (verified
+    /// in a VM) `SckMonitor::all()` -> `SCShareableContent::current()` never
+    /// completes, so the first monitor listing blocks startup and the HTTP API
+    /// never binds. macOS 12.3-12.x showed the same symptom in the field (not
+    /// verified in a VM). sck-rs window capture also calls
+    /// `SCScreenshotManager`, which only exists from macOS 14.0. Below 14 use
+    /// the xcap (CoreGraphics) path. Limitation: xcap cannot exclude windows,
+    /// so with ignored/included-window filters set, matching captures fail
+    /// closed (`capture_image_excluding`) rather than leak those windows.
     pub fn use_sck_rs() -> bool {
         let (major, _minor) = *MACOS_VERSION;
         major >= 14
