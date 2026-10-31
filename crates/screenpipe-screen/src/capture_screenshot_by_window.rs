@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fmt;
 use tracing::debug;
 
-// On macOS, we have both sck-rs (for 12.3+) and xcap (fallback for older versions)
+// On macOS, we have both sck-rs (for 14+, see use_sck_rs) and xcap (fallback for older versions)
 #[cfg(target_os = "macos")]
 use sck_rs::{Window as SckWindow, XCapError as SckXCapError};
 

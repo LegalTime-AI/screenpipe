@@ -33,7 +33,7 @@ pub use windows::{
     list_monitors, list_monitors_detailed,
 };
 
-// On macOS, we have both sck-rs (for 12.3+) and xcap (fallback for older versions)
+// On macOS, we have both sck-rs (for 14+, see use_sck_rs) and xcap (fallback for older versions)
 #[cfg(target_os = "macos")]
 use sck_rs::Monitor as SckMonitor;
 
