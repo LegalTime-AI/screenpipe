@@ -48,18 +48,18 @@ pub mod macos_version {
     pub static MACOS_VERSION: Lazy<(u32, u32)> =
         Lazy::new(|| get_macos_version().unwrap_or((0, 0)));
 
-    /// Check if we should use sck-rs for screenshots (monitor `capture_image`
-    /// and per-window capture).
+    /// Check if we should use sck-rs (ScreenCaptureKit) for monitor listing,
+    /// monitor screenshots and per-window capture.
     ///
-    /// ScreenCaptureKit itself exists from macOS 12.3, but sck-rs's window
-    /// capture and its one-shot monitor fallback call `SCScreenshotManager`,
-    /// which Apple added in macOS 14.0 (absent from 13.3.1's ScreenCaptureKit).
-    /// On 12.3-13.x cidre resolves that class to nil, the message goes to nil,
-    /// the completion handler never runs and the capture future never
-    /// resolves: capture silently hangs (LegalTime LEG-373, macOS 12.7.6 Intel
-    /// and 13.3.1 Apple Silicon). Use the xcap (CoreGraphics) path below 14.
-    /// The persistent SCStream helpers that do not touch SCScreenshotManager
-    /// stay available on 12.3+.
+    /// ScreenCaptureKit exists from macOS 12.3, but on macOS 13 it hangs this
+    /// engine: verified on a macOS 13.3.1 VM (2026-10-30), `SckMonitor::all()`
+    /// -> `SCShareableContent::current()` never completes, so the first
+    /// monitor listing blocks startup forever and the HTTP API never binds
+    /// (LegalTime LEG-373: macOS 12.7.6 Intel and 13.3.1 Apple Silicon
+    /// customers). sck-rs window capture and its one-shot monitor fallback also
+    /// call `SCScreenshotManager`, which macOS 13's ScreenCaptureKit does not
+    /// have at all (added in 14.0). Below 14 use the xcap (CoreGraphics) path,
+    /// which the same VM test showed starting in ~5 s and saving real frames.
     pub fn use_sck_rs() -> bool {
         let (major, _minor) = *MACOS_VERSION;
         major >= 14
@@ -396,7 +396,11 @@ pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, M
                         }
                     }
                 } else {
-                    tracing::info!("Using xcap fallback for screen capture (macOS < 14: no SCScreenshotManager)");
+                    // Monitors are listed every few seconds; say this once.
+                    static XCAP_FALLBACK_LOGGED: std::sync::Once = std::sync::Once::new();
+                    XCAP_FALLBACK_LOGGED.call_once(|| {
+                        tracing::info!("Using xcap (CoreGraphics) screen capture: macOS < 14");
+                    });
                     match XcapMonitor::all() {
                         Ok(monitors) if monitors.is_empty() => {
                             Err(MonitorListError::NoMonitorsFound)
@@ -566,6 +570,12 @@ impl SafeMonitor {
     /// private windows never reach the recorder. Blocks briefly while the
     /// stream starts; call from a blocking context.
     pub fn start_hd_capture(&self, fps: u32, excluded_window_ids: &[u32]) -> Result<HdCapture> {
+        // The HD stream starts with the same SCShareableContent fetch that never
+        // completes on macOS < 14 (see `use_sck_rs`); fail fast instead of
+        // parking a blocking thread forever.
+        if !use_sck_rs() {
+            anyhow::bail!("start_hd_capture failed: HD capture requires macOS 14+");
+        }
         let (width, height) = hd_scaled_dims(
             self.monitor_data.width,
             self.monitor_data.height,
