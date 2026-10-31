@@ -48,10 +48,21 @@ pub mod macos_version {
     pub static MACOS_VERSION: Lazy<(u32, u32)> =
         Lazy::new(|| get_macos_version().unwrap_or((0, 0)));
 
-    /// Check if we should use sck-rs (requires macOS 12.3+)
+    /// Check if we should use sck-rs for screenshots (monitor `capture_image`
+    /// and per-window capture).
+    ///
+    /// ScreenCaptureKit itself exists from macOS 12.3, but sck-rs's window
+    /// capture and its one-shot monitor fallback call `SCScreenshotManager`,
+    /// which Apple added in macOS 14.0 (absent from 13.3.1's ScreenCaptureKit).
+    /// On 12.3-13.x cidre resolves that class to nil, the message goes to nil,
+    /// the completion handler never runs and the capture future never
+    /// resolves: capture silently hangs (LegalTime LEG-373, macOS 12.7.6 Intel
+    /// and 13.3.1 Apple Silicon). Use the xcap (CoreGraphics) path below 14.
+    /// The persistent SCStream helpers that do not touch SCScreenshotManager
+    /// stay available on 12.3+.
     pub fn use_sck_rs() -> bool {
-        let (major, minor) = *MACOS_VERSION;
-        major > 12 || (major == 12 && minor >= 3)
+        let (major, _minor) = *MACOS_VERSION;
+        major >= 14
     }
 
     fn get_macos_version() -> Option<(u32, u32)> {
@@ -361,7 +372,7 @@ pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, M
         tokio::task::spawn_blocking(|| {
             cidre::objc::ar_pool(|| {
                 if use_sck_rs() {
-                    tracing::debug!("Using sck-rs for screen capture (macOS 12.3+)");
+                    tracing::debug!("Using sck-rs for screen capture (macOS 14+)");
                     match SckMonitor::all() {
                         Ok(monitors) if monitors.is_empty() => {
                             Err(MonitorListError::NoMonitorsFound)
@@ -385,7 +396,7 @@ pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, M
                         }
                     }
                 } else {
-                    tracing::info!("Using xcap fallback for screen capture (macOS < 12.3)");
+                    tracing::info!("Using xcap fallback for screen capture (macOS < 14: no SCScreenshotManager)");
                     match XcapMonitor::all() {
                         Ok(monitors) if monitors.is_empty() => {
                             Err(MonitorListError::NoMonitorsFound)
