@@ -234,15 +234,22 @@ fn is_browser(app_name: &str) -> bool {
 /// (e.g. "Netflix - Comet" → synthesizes "https://netflix.com").
 #[cfg(target_os = "macos")]
 fn get_focused_app_info() -> Option<(String, Option<String>)> {
+    if screenpipe_core::app_identity::accessibility_disabled() {
+        return None;
+    }
     cidre::objc::ar_pool(|| {
         use cidre::{ax, ns};
 
         let sys = ax::UiElement::sys_wide();
         let app = sys.focused_app().ok()?;
         let pid = app.pid().ok()?;
-        let name = ns::RunningApp::with_pid(pid)
-            .and_then(|app| app.localized_name())
-            .map(|s| s.to_string())?;
+        let name = if screenpipe_core::app_identity::use_safe_app_identity() {
+            screenpipe_core::app_identity::app_name_for_pid(pid)?
+        } else {
+            ns::RunningApp::with_pid(pid)
+                .and_then(|app| app.localized_name())
+                .map(|s| s.to_string())?
+        };
 
         let url = if is_browser(&name) {
             // Try standard URL extraction first

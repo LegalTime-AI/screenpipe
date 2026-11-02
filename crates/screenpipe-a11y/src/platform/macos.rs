@@ -193,7 +193,8 @@ impl UiRecorder {
     /// Check current permission status
     pub fn check_permissions(&self) -> PermissionStatus {
         PermissionStatus {
-            accessibility: ax::is_process_trusted(),
+            accessibility: !screenpipe_core::app_identity::accessibility_disabled()
+                && ax::is_process_trusted(),
             input_monitoring: check_input_monitoring(),
         }
     }
@@ -201,7 +202,8 @@ impl UiRecorder {
     /// Request permissions (shows system dialogs)
     pub fn request_permissions(&self) -> PermissionStatus {
         PermissionStatus {
-            accessibility: ax::is_process_trusted_with_prompt(true),
+            accessibility: !screenpipe_core::app_identity::accessibility_disabled()
+                && ax::is_process_trusted_with_prompt(true),
             input_monitoring: request_input_monitoring(),
         }
     }
@@ -1634,10 +1636,14 @@ fn get_focused_app_info() -> Option<(i32, String)> {
         let sys = ax::UiElement::sys_wide();
         let app = sys.focused_app().ok()?;
         let pid = app.pid().ok()?;
-        let name = ns::RunningApp::with_pid(pid)
-            .and_then(|app| app.localized_name())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "?".to_string());
+        let name = if screenpipe_core::app_identity::use_safe_app_identity() {
+            screenpipe_core::app_identity::app_name_for_pid(pid)
+        } else {
+            ns::RunningApp::with_pid(pid)
+                .and_then(|app| app.localized_name())
+                .map(|s| s.to_string())
+        }
+        .unwrap_or_else(|| "?".to_string());
         Some((pid, name))
     })
 }

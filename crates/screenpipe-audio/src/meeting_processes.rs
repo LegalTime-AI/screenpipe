@@ -206,6 +206,13 @@ mod platform {
         let Some(pid) = pid else {
             return (None, None);
         };
+        // LEG-706: no NSRunningApplication strings on macOS < 13.
+        if screenpipe_core::app_identity::use_safe_app_identity() {
+            return (
+                screenpipe_core::app_identity::app_name_for_pid(pid),
+                screenpipe_core::app_identity::bundle_id_for_pid(pid),
+            );
+        }
         // Wrap in an autorelease pool — `ns::RunningApp::with_pid` returns an
         // autoreleased NSRunningApplication, and reading its name/bundle-id
         // lazily allocates an NSLock + a LaunchServices LSASN. Without draining,
