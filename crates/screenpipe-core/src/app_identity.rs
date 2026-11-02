@@ -14,7 +14,7 @@
 //! macOS below 13. It reads only data this process owns: a fresh copy of the
 //! window server's window list, the kernel process table (`proc_pidpath`,
 //! `proc_name`) and the app's own Info.plist through CFBundle. Every CF value
-//! is type-checked before it is read.
+//! is type-checked before it is read. Lookups are memoized per pid for 10 s.
 //!
 //! `SCREENPIPE_SAFE_APP_IDENTITY=1` forces this path on any macOS version,
 //! `=0` forces it off. Non-macOS builds compile to no-ops.
@@ -163,6 +163,36 @@ mod imp {
         }
     }
 
+    type PidCache<T> = OnceLock<Mutex<HashMap<i32, (Instant, T)>>>;
+    /// Short enough that a reused pid is rarely served a dead app's identity,
+    /// long enough that per-frame lookups (tree walker, meeting scan) hit.
+    const CACHE_TTL: Duration = Duration::from_secs(10);
+    const CACHE_MAX: usize = 512;
+
+    /// Per-pid memo, failures included (a pid with no name must not copy the
+    /// whole window list on every frame). Hard-bounded at CACHE_MAX entries.
+    fn cached<T: Clone>(cell: &'static PidCache<T>, pid: i32, f: impl FnOnce() -> T) -> T {
+        let cache = cell.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(map) = cache.lock() {
+            if let Some((at, v)) = map.get(&pid) {
+                if at.elapsed() < CACHE_TTL {
+                    return v.clone();
+                }
+            }
+        }
+        let v = f();
+        if let Ok(mut map) = cache.lock() {
+            if map.len() >= CACHE_MAX {
+                map.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+                if map.len() >= CACHE_MAX {
+                    map.clear();
+                }
+            }
+            map.insert(pid, (Instant::now(), v.clone()));
+        }
+        v
+    }
+
     pub fn use_safe_app_identity() -> bool {
         static V: OnceLock<bool> = OnceLock::new();
         *V.get_or_init(|| match std::env::var("SCREENPIPE_SAFE_APP_IDENTITY").as_deref() {
@@ -276,7 +306,8 @@ mod imp {
     }
 
     pub fn bundle_path_for_pid(pid: i32) -> Option<PathBuf> {
-        super::innermost_app_bundle(&executable_path(pid)?)
+        static CACHE: PidCache<Option<PathBuf>> = OnceLock::new();
+        cached(&CACHE, pid, || super::innermost_app_bundle(&executable_path(pid)?))
     }
 
     fn with_bundle<T>(pid: i32, f: impl FnOnce(CFTypeRef) -> Option<T>) -> Option<T> {
@@ -301,7 +332,10 @@ mod imp {
     }
 
     pub fn bundle_id_for_pid(pid: i32) -> Option<String> {
-        with_bundle(pid, |b| unsafe { cf_string(CFBundleGetIdentifier(b)) })
+        static CACHE: PidCache<Option<String>> = OnceLock::new();
+        cached(&CACHE, pid, || {
+            with_bundle(pid, |b| unsafe { cf_string(CFBundleGetIdentifier(b)) })
+        })
     }
 
     fn bundle_display_name(pid: i32) -> Option<String> {
@@ -335,29 +369,13 @@ mod imp {
         (!s.is_empty()).then_some(s)
     }
 
-    /// Names per pid for 30 s: the tree walker asks for the focused app on
-    /// every frame, and a full window-list copy each time is wasted work.
     pub fn app_name_for_pid(pid: i32) -> Option<String> {
-        static CACHE: OnceLock<Mutex<HashMap<i32, (Instant, String)>>> = OnceLock::new();
-        const TTL: Duration = Duration::from_secs(30);
-        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Ok(map) = cache.lock() {
-            if let Some((at, name)) = map.get(&pid) {
-                if at.elapsed() < TTL {
-                    return Some(name.clone());
-                }
-            }
-        }
-        let name = window_owner_name(pid)
-            .or_else(|| bundle_display_name(pid))
-            .or_else(|| kernel_name(pid))?;
-        if let Ok(mut map) = cache.lock() {
-            if map.len() > 512 {
-                map.retain(|_, (at, _)| at.elapsed() < TTL);
-            }
-            map.insert(pid, (Instant::now(), name.clone()));
-        }
-        Some(name)
+        static CACHE: PidCache<Option<String>> = OnceLock::new();
+        cached(&CACHE, pid, || {
+            window_owner_name(pid)
+                .or_else(|| bundle_display_name(pid))
+                .or_else(|| kernel_name(pid))
+        })
     }
 }
 

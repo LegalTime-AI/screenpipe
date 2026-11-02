@@ -252,8 +252,21 @@ pub(crate) fn get_ax_identifier(elem: &cidre::ax::UiElement) -> Option<String> {
     None
 }
 
+/// Name of a running app for meeting matching. LEG-706: on macOS < 13 never
+/// read NSRunningApplication.localizedName (its NSString crashed the engine on
+/// an Intel macOS 12.7.6 Mac); only the integer pid is taken from `app`.
+fn running_app_name(app: &cidre::ns::RunningApp) -> Option<String> {
+    if screenpipe_core::app_identity::use_safe_app_identity() {
+        return screenpipe_core::app_identity::app_name_for_pid(app.pid());
+    }
+    app.localized_name().map(|s| s.to_string())
+}
+
 /// Get the app name for a PID on macOS.
 pub(crate) fn get_app_name_for_pid(pid: i32) -> Option<String> {
+    if screenpipe_core::app_identity::use_safe_app_identity() {
+        return screenpipe_core::app_identity::app_name_for_pid(pid);
+    }
     cidre::objc::ar_pool(|| -> Option<String> {
         let app = cidre::ns::RunningApp::with_pid(pid)?;
         app.localized_name().map(|s| s.to_string())
@@ -277,6 +290,10 @@ pub fn find_running_meeting_apps(
     currently_tracking: Option<&ActiveTracking>,
 ) -> Vec<RunningMeetingApp> {
     let mut results = Vec::new();
+    // LEG-706 crash-loop fallback: this scan is accessibility-driven.
+    if screenpipe_core::app_identity::accessibility_disabled() {
+        return results;
+    }
 
     cidre::objc::ar_pool(|| {
         let workspace = cidre::ns::Workspace::shared();
@@ -285,8 +302,8 @@ pub fn find_running_meeting_apps(
         for i in 0..apps.len() {
             let app = &apps[i];
             let pid = app.pid();
-            let name = match app.localized_name() {
-                Some(n) => n.to_string(),
+            let name = match running_app_name(app) {
+                Some(n) => n,
                 None => continue,
             };
             let name_lower = name.to_lowercase();
@@ -568,8 +585,8 @@ pub(crate) fn resolve_browser_pid(app: &str) -> i32 {
         let apps = ws.running_apps();
         for i in 0..apps.len() {
             let a = &apps[i];
-            if let Some(n) = a.localized_name() {
-                if n.to_string().to_lowercase() == app_lower {
+            if let Some(n) = running_app_name(a) {
+                if n.to_lowercase() == app_lower {
                     return a.pid();
                 }
             }
