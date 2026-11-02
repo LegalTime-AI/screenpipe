@@ -403,6 +403,10 @@ fn framework_has_renderer_helper(framework_dir: &Path) -> bool {
 /// bundle URL, unreadable bundle) returns `false` — never poke an app we
 /// can't identify.
 fn is_chromium_family(pid: i32) -> bool {
+    if screenpipe_core::app_identity::use_safe_app_identity() {
+        return screenpipe_core::app_identity::bundle_path_for_pid(pid)
+            .is_some_and(|root| bundle_signals_chromium(&root));
+    }
     let bundle_root = cidre::objc::ar_pool(|| {
         ns::RunningApp::with_pid(pid)
             .and_then(|app| app.bundle_url())
@@ -416,6 +420,9 @@ fn is_chromium_family(pid: i32) -> bool {
 }
 
 fn bundle_id_for_pid(pid: i32) -> Option<String> {
+    if screenpipe_core::app_identity::use_safe_app_identity() {
+        return screenpipe_core::app_identity::bundle_id_for_pid(pid);
+    }
     cidre::objc::ar_pool(|| {
         ns::RunningApp::with_pid(pid)
             .and_then(|app| app.bundle_id())
@@ -477,6 +484,9 @@ impl MacosTreeWalker {
 
 impl TreeWalkerPlatform for MacosTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
+        if screenpipe_core::app_identity::accessibility_disabled() {
+            return Ok(TreeWalkResult::NotFound);
+        }
         // Wrap in autorelease pool — cidre AX/NS APIs create autoreleased
         // ObjC objects. Without this, objects accumulate on the tokio
         // blocking thread (reused across calls), causing a memory leak
@@ -1861,7 +1871,10 @@ fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
     // kept resolving the terminal indefinitely. Cross-check against the
     // window server (fresh in any process); NSWorkspace's isActive scan
     // remains as a secondary source for run-loop processes.
-    let ws_active = cidre::objc::ar_pool(|| -> Option<(i32, String)> {
+    // LEG-706: on macOS < 13 never read NSRunningApplication strings; the
+    // window server (below) already gives the frontmost pid.
+    let safe_identity = screenpipe_core::app_identity::use_safe_app_identity();
+    let ws_active = (!safe_identity).then(|| cidre::objc::ar_pool(|| -> Option<(i32, String)> {
         let workspace = ns::Workspace::shared();
         for app in workspace.running_apps().iter() {
             if !app.is_active() {
@@ -1875,7 +1888,7 @@ fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
             return Some((pid, app_name));
         }
         None
-    });
+    })).flatten();
     let front_pid =
         frontmost_pid_via_window_server().or_else(|| ws_active.as_ref().map(|(pid, _)| *pid));
 
@@ -1918,6 +1931,9 @@ fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
 }
 
 fn localized_app_name_for_pid(pid: i32) -> String {
+    if screenpipe_core::app_identity::use_safe_app_identity() {
+        return screenpipe_core::app_identity::app_name_for_pid(pid).unwrap_or_default();
+    }
     cidre::objc::ar_pool(|| {
         ns::RunningApp::with_pid(pid)
             .and_then(|app| app.localized_name())

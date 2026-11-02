@@ -2909,6 +2909,14 @@ fn get_focused_metadata_lightweight() -> Option<LightweightFocusedMetadata> {
 fn query_frontmost_app_name_uncached() -> Option<String> {
     use cidre::{ax, ns, objc};
 
+    // LEG-706: on macOS < 13 name the frontmost app from the window server
+    // and the process table, never from NSRunningApplication strings.
+    if screenpipe_core::app_identity::use_safe_app_identity() {
+        return screenpipe_core::app_identity::frontmost_app()
+            .map(|(_, name)| name)
+            .filter(|n| !n.is_empty());
+    }
+
     // Wrapped in an autorelease pool because `running_apps()` returns
     // autoreleased NSRunningApplication objects; without draining they
     // leak across polls (same precedent as get_frontmost_pid in
