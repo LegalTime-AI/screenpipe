@@ -348,9 +348,49 @@ where
     }
 }
 
+/// Error text for System Audio on a Mac whose ScreenCaptureKit has no audio.
+/// The device monitor treats it as permanent (no retry loop).
+pub const SCK_AUDIO_UNSUPPORTED_MSG: &str =
+    "System Audio capture requires macOS 13 or later (ScreenCaptureKit audio)";
+
+/// Test switch: behave as if ScreenCaptureKit audio were missing (macOS 12),
+/// so the macOS < 13 path can be exercised on a newer Mac.
+pub const SIMULATE_NO_SCK_AUDIO_ENV: &str = "SCREENPIPE_SIMULATE_NO_SCK_AUDIO";
+
+/// Pure decision for [`screencapturekit_audio_supported`].
+///
+/// `SCStreamConfiguration.capturesAudio` / `excludesCurrentProcessAudio` are
+/// `API_AVAILABLE(macos(13.0))`. On macOS 12 cpal's SCK host still calls
+/// `setCapturesAudio:`, which raises an Objective-C "unrecognized selector"
+/// exception inside a tokio blocking task; Rust cannot catch a foreign
+/// exception, so the whole recorder aborts ("fatal runtime error: Rust cannot
+/// catch foreign exceptions") seconds after every meeting start (LEG-736,
+/// Intel macOS 12.7.6). An unknown version keeps the established behaviour.
+pub fn sck_audio_supported_for(macos_major: Option<u32>, simulate_missing: bool) -> bool {
+    if simulate_missing {
+        return false;
+    }
+    macos_major.map_or(true, |major| major >= 13)
+}
+
+/// Whether ScreenCaptureKit can capture system audio on this Mac.
+#[cfg(target_os = "macos")]
+pub fn screencapturekit_audio_supported() -> bool {
+    let simulate = std::env::var(SIMULATE_NO_SCK_AUDIO_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    sck_audio_supported_for(screenpipe_config::macos_major_version(), simulate)
+}
+
 /// Gets the ScreenCaptureKit host with retry mechanism
 #[cfg(target_os = "macos")]
 async fn get_screen_capture_host() -> Result<cpal::Host> {
+    // Every SCK audio path (System Audio lookup, device listing, default
+    // output) goes through here: refusing on macOS < 13 keeps cpal from ever
+    // calling the missing capturesAudio setter.
+    if !screencapturekit_audio_supported() {
+        return Err(anyhow!(SCK_AUDIO_UNSUPPORTED_MSG));
+    }
     // necessary hack because this is unreliable, especially during Metal/GPU init
     with_retry(
         || async {
@@ -896,6 +936,13 @@ pub async fn default_output_device() -> Result<AudioDevice> {
                 MACOS_OUTPUT_AUDIO_DEVICE_NAME.to_string(),
                 DeviceType::Output,
             ));
+        }
+
+        // macOS < 13: ScreenCaptureKit has no audio. Say so in words the
+        // device monitor treats as permanent, so it records the microphone
+        // alone instead of retrying System Audio forever.
+        if !screencapturekit_audio_supported() {
+            return Err(anyhow!(SCK_AUDIO_UNSUPPORTED_MSG));
         }
 
         // Fallback: SCK display-based capture for macOS < 14.4
@@ -1670,5 +1717,32 @@ mod stream_config_tests {
         assert!(ensure_usable_stream_config(32, 192_000, "Dante").is_ok());
         assert!(ensure_usable_stream_config(64, 384_000, "MADI").is_ok());
         assert!(ensure_usable_stream_config(1, 8_000, "Bluetooth HFP").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod sck_audio_support_tests {
+    use super::sck_audio_supported_for;
+
+    #[test]
+    fn macos_12_has_no_screencapturekit_audio() {
+        assert!(!sck_audio_supported_for(Some(12), false));
+        assert!(!sck_audio_supported_for(Some(11), false));
+    }
+
+    #[test]
+    fn macos_13_and_later_keep_screencapturekit_audio() {
+        assert!(sck_audio_supported_for(Some(13), false));
+        assert!(sck_audio_supported_for(Some(26), false));
+    }
+
+    #[test]
+    fn unknown_version_keeps_existing_behaviour() {
+        assert!(sck_audio_supported_for(None, false));
+    }
+
+    #[test]
+    fn simulation_switch_forces_the_macos_12_path() {
+        assert!(!sck_audio_supported_for(Some(26), true));
     }
 }

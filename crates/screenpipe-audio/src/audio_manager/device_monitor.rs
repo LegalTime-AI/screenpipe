@@ -202,6 +202,7 @@ fn default_switch_retry_backoff_active(
 fn is_permanent_output_error(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
     msg.contains("no display audio device found")
+        || msg.contains(crate::core::device::SCK_AUDIO_UNSUPPORTED_MSG)
 }
 
 /// Returns true if the error from `default_input_device()` indicates a
@@ -2408,6 +2409,10 @@ mod tests {
 
         let other = anyhow::anyhow!("some random error");
         assert!(!is_permanent_output_error(&other));
+
+        // macOS < 13 (LEG-736): no SCK audio is permanent, never a retry loop.
+        let no_sck_audio = anyhow::anyhow!(crate::core::device::SCK_AUDIO_UNSUPPORTED_MSG);
+        assert!(is_permanent_output_error(&no_sck_audio));
     }
 
     #[test]
