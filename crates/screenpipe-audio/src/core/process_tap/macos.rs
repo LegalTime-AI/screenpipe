@@ -48,6 +48,14 @@ static MACOS_VERSION: OnceLock<Option<(u64, u64, u64)>> = OnceLock::new();
 ///
 // Availability gating + stable-path fallback live in audio_manager/meeting_piggyback.rs (decide_piggyback).
 pub fn is_process_tap_available() -> bool {
+    // The macOS 12 simulation (LEG-736) must also hide the 14.4+ tap, or a
+    // newer test Mac would never reach the no-ScreenCaptureKit-audio path.
+    if std::env::var(crate::core::device::SIMULATE_NO_SCK_AUDIO_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
     let version = MACOS_VERSION.get_or_init(detect_os_version);
     match version {
         Some((major, minor, _)) => {
