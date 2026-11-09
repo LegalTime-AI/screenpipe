@@ -1874,21 +1874,25 @@ fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
     // LEG-706: on macOS < 13 never read NSRunningApplication strings; the
     // window server (below) already gives the frontmost pid.
     let safe_identity = screenpipe_core::app_identity::use_safe_app_identity();
-    let ws_active = (!safe_identity).then(|| cidre::objc::ar_pool(|| -> Option<(i32, String)> {
-        let workspace = ns::Workspace::shared();
-        for app in workspace.running_apps().iter() {
-            if !app.is_active() {
-                continue;
-            }
-            let pid = app.pid();
-            let app_name = app
-                .localized_name()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            return Some((pid, app_name));
-        }
-        None
-    })).flatten();
+    let ws_active = (!safe_identity)
+        .then(|| {
+            cidre::objc::ar_pool(|| -> Option<(i32, String)> {
+                let workspace = ns::Workspace::shared();
+                for app in workspace.running_apps().iter() {
+                    if !app.is_active() {
+                        continue;
+                    }
+                    let pid = app.pid();
+                    let app_name = app
+                        .localized_name()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    return Some((pid, app_name));
+                }
+                None
+            })
+        })
+        .flatten();
     let front_pid =
         frontmost_pid_via_window_server().or_else(|| ws_active.as_ref().map(|(pid, _)| *pid));
 

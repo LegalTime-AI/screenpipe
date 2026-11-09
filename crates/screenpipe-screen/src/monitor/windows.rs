@@ -422,15 +422,36 @@ mod tests {
         let failures = Arc::new(AtomicU32::new(0));
         let transient = std::sync::Mutex::new(TransientRetry::default());
 
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 1");
+        SafeMonitor::record_persistent_init_failure(
+            1,
+            &persistent,
+            &disabled,
+            &failures,
+            &transient,
+            "err 1",
+        );
         assert!(!disabled.load(Ordering::Relaxed));
         assert_eq!(failures.load(Ordering::Relaxed), 1);
 
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 2");
+        SafeMonitor::record_persistent_init_failure(
+            1,
+            &persistent,
+            &disabled,
+            &failures,
+            &transient,
+            "err 2",
+        );
         assert!(!disabled.load(Ordering::Relaxed));
         assert_eq!(failures.load(Ordering::Relaxed), 2);
 
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 3");
+        SafeMonitor::record_persistent_init_failure(
+            1,
+            &persistent,
+            &disabled,
+            &failures,
+            &transient,
+            "err 3",
+        );
         assert!(disabled.load(Ordering::Relaxed));
         assert_eq!(failures.load(Ordering::Relaxed), 3);
         // Disable must also drain any stored session (race: a concurrent
@@ -438,7 +459,14 @@ mod tests {
         assert!(persistent.lock().unwrap().is_none());
 
         // Further failures after disable must not panic or re-log; drain stays idempotent.
-        SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, &transient, "err 4");
+        SafeMonitor::record_persistent_init_failure(
+            1,
+            &persistent,
+            &disabled,
+            &failures,
+            &transient,
+            "err 4",
+        );
         assert!(disabled.load(Ordering::Relaxed));
         assert!(persistent.lock().unwrap().is_none());
     }
@@ -458,15 +486,28 @@ mod tests {
         ];
         for i in 0..50 {
             SafeMonitor::record_persistent_init_failure(
-                1, &persistent, &disabled, &failures, &transient, reasons[i % reasons.len()],
+                1,
+                &persistent,
+                &disabled,
+                &failures,
+                &transient,
+                reasons[i % reasons.len()],
             );
         }
-        assert!(!disabled.load(Ordering::Relaxed), "a locked/secure desktop must never disable DXGI");
+        assert!(
+            !disabled.load(Ordering::Relaxed),
+            "a locked/secure desktop must never disable DXGI"
+        );
         assert_eq!(failures.load(Ordering::Relaxed), 0);
         // A real backend failure still counts after transient ones.
         for i in 0..3 {
             SafeMonitor::record_persistent_init_failure(
-                1, &persistent, &disabled, &failures, &transient, &format!("DXGI_ERROR_UNSUPPORTED {i}"),
+                1,
+                &persistent,
+                &disabled,
+                &failures,
+                &transient,
+                &format!("DXGI_ERROR_UNSUPPORTED {i}"),
             );
         }
         assert!(disabled.load(Ordering::Relaxed));
@@ -494,7 +535,11 @@ mod tests {
     fn test_transient_classification() {
         assert!(is_transient_init_failure("Access is denied. (0x80070005)"));
         assert!(is_transient_init_failure("DXGI duplication access lost: x"));
-        assert!(!is_transient_init_failure("DuplicateOutput failed: The request is not supported. (0x887A0004)"));
-        assert!(!is_transient_init_failure("D3D11CreateDevice for DXGI adapter failed: x"));
+        assert!(!is_transient_init_failure(
+            "DuplicateOutput failed: The request is not supported. (0x887A0004)"
+        ));
+        assert!(!is_transient_init_failure(
+            "D3D11CreateDevice for DXGI adapter failed: x"
+        ));
     }
 }

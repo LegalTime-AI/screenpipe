@@ -93,7 +93,10 @@ pub fn script_target(script: &str) -> String {
 /// True for a run killed at the limit or skipped during a cooldown; callers
 /// treat it exactly like a script that failed.
 pub fn is_timeout(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
 }
 
 /// `osascript -e <script>` with the time limit and per-app cooldown.
@@ -129,7 +132,11 @@ fn run_guarded(
     if matches!(&result, Err(e) if e.kind() == io::ErrorKind::TimedOut) {
         tracing::warn!(
             "osascript to {:?} timed out after {} ms (consent prompt open?); skipping it for {} s",
-            if key.is_empty() { "<unknown>" } else { key.as_str() },
+            if key.is_empty() {
+                "<unknown>"
+            } else {
+                key.as_str()
+            },
             timeout.as_millis(),
             cooldown.as_secs()
         );
@@ -153,7 +160,8 @@ mod tests {
 
     #[test]
     fn fast_command_returns_output() {
-        let out = output_with_timeout(&mut sh("printf hi; printf err >&2"), Duration::from_secs(5)).unwrap();
+        let out = output_with_timeout(&mut sh("printf hi; printf err >&2"), Duration::from_secs(5))
+            .unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout, b"hi");
         assert_eq!(out.stderr, b"err");
@@ -164,7 +172,11 @@ mod tests {
         let t = Instant::now();
         let err = output_with_timeout(&mut sh("sleep 30"), Duration::from_millis(300)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(t.elapsed() < Duration::from_secs(3), "took {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            t.elapsed()
+        );
     }
 
     #[test]
@@ -175,8 +187,14 @@ mod tests {
 
     #[test]
     fn target_is_parsed_from_the_script() {
-        assert_eq!(script_target(r#"tell application "Google Chrome" to return 1"#), "google chrome");
-        assert_eq!(script_target(r#"if application "Arc" is running then"#), "arc");
+        assert_eq!(
+            script_target(r#"tell application "Google Chrome" to return 1"#),
+            "google chrome"
+        );
+        assert_eq!(
+            script_target(r#"if application "Arc" is running then"#),
+            "arc"
+        );
         assert_eq!(script_target("return 1"), "");
     }
 
@@ -184,24 +202,53 @@ mod tests {
     fn timeout_cools_down_only_that_app() {
         let slow = r#"tell application "TestSlowApp-cooldown" to x"#;
         let other = r#"tell application "TestOtherApp-cooldown" to x"#;
-        let e = run_guarded(slow, Duration::from_millis(200), Duration::from_secs(60), || sh("sleep 30")).unwrap_err();
+        let e = run_guarded(
+            slow,
+            Duration::from_millis(200),
+            Duration::from_secs(60),
+            || sh("sleep 30"),
+        )
+        .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::TimedOut);
         // Same app: skipped at once, the command is never started.
         let t = Instant::now();
-        let e = run_guarded(slow, Duration::from_millis(200), Duration::from_secs(60), || sh("sleep 30")).unwrap_err();
+        let e = run_guarded(
+            slow,
+            Duration::from_millis(200),
+            Duration::from_secs(60),
+            || sh("sleep 30"),
+        )
+        .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
         assert!(t.elapsed() < Duration::from_millis(100));
         // Other apps are unaffected.
-        let out = run_guarded(other, Duration::from_secs(5), Duration::from_secs(60), || sh("printf ok")).unwrap();
+        let out = run_guarded(
+            other,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            || sh("printf ok"),
+        )
+        .unwrap();
         assert_eq!(out.stdout, b"ok");
     }
 
     #[test]
     fn cooldown_expires() {
         let slow = r#"tell application "TestExpireApp-cooldown" to x"#;
-        let _ = run_guarded(slow, Duration::from_millis(100), Duration::from_millis(200), || sh("sleep 30"));
+        let _ = run_guarded(
+            slow,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            || sh("sleep 30"),
+        );
         thread::sleep(Duration::from_millis(300));
-        let out = run_guarded(slow, Duration::from_secs(5), Duration::from_millis(200), || sh("printf back")).unwrap();
+        let out = run_guarded(
+            slow,
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+            || sh("printf back"),
+        )
+        .unwrap();
         assert_eq!(out.stdout, b"back");
     }
 }

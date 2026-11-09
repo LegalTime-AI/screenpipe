@@ -79,7 +79,10 @@ pub fn create_whisper_context_parameters<'a>(
     if let Ok(v) = std::env::var("SCREENPIPE_WHISPER_FLASH_ATTN") {
         let on = v == "1" || v.eq_ignore_ascii_case("true");
         context_param.flash_attn(on);
-        info!("whisper context: flash_attn={} (SCREENPIPE_WHISPER_FLASH_ATTN)", on);
+        info!(
+            "whisper context: flash_attn={} (SCREENPIPE_WHISPER_FLASH_ATTN)",
+            on
+        );
     }
     if let Ok(v) = std::env::var("SCREENPIPE_WHISPER_GPU") {
         let on = v == "1" || v.eq_ignore_ascii_case("true");

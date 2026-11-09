@@ -38,8 +38,12 @@ fn main() {
         let (ns_name, ns_id) = objc::ar_pool(|| {
             let app = ns::RunningApp::with_pid(pid);
             (
-                app.as_ref().and_then(|a| a.localized_name()).map(|s| s.to_string()),
-                app.as_ref().and_then(|a| a.bundle_id()).map(|s| s.to_string()),
+                app.as_ref()
+                    .and_then(|a| a.localized_name())
+                    .map(|s| s.to_string()),
+                app.as_ref()
+                    .and_then(|a| a.bundle_id())
+                    .map(|s| s.to_string()),
             )
         });
         // XPC services / extensions get " (Host)" appended to their
