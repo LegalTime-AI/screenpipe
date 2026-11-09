@@ -2297,7 +2297,6 @@ async fn main() -> anyhow::Result<()> {
         use screenpipe_redact::{
             adapters::{
                 onnx::{OnnxConfig, OnnxRedactor},
-                opf::{OpfAdapter, OpfConfig},
                 tinfoil::{TinfoilConfig, TinfoilRedactor},
             },
             pipeline::{Pipeline, PipelineConfig},
@@ -2373,34 +2372,13 @@ async fn main() -> anyhow::Result<()> {
                     )
                 }
                 Err(onnx_err) => {
-                    tracing::warn!(
-                        "couldn't load v45 phase 3 ONNX redactor ({onnx_err}); falling back \
-                         to OPF v6 candle"
-                    );
-                    info!(
-                        "fetching local OPF v6 checkpoint (~2.8 GB on first run, cached at \
-                         ~/.screenpipe/models/opf-v6/)"
-                    );
-                    match OpfAdapter::load_or_download(OpfConfig::default()).await {
-                        Ok(adapter) => {
-                            info!(
-                                "text-PII AI step: local opf-rs (candle) fallback — lazy load \
-                                 on first batch, idle-unload after 60s of no work"
-                            );
-                            // Wrap in Arc first so we can spawn the idle
-                            // unloader (which needs `Arc<Self>`) and still
-                            // hand the same Arc to the Pipeline.
-                            let adapter = Arc::new(adapter);
-                            let _unloader = Arc::clone(&adapter).spawn_idle_unloader();
-                            let ai: Arc<dyn Redactor> = adapter;
-                            Pipeline::regex_then_ai(
-                                ai,
-                                PipelineConfig {
-                                    policy: policy.clone(),
-                                    ..Default::default()
-                                },
-                            )
-                        }
+                    tracing::warn!("couldn't load v45 phase 3 ONNX redactor ({onnx_err})");
+                    // opf-rs (candle) is CC BY-NC 4.0 and pulls zip 7.2 via candle 0.10
+                    // (GHSA-m665), so it was removed from LegalTime builds (LEG-810).
+                    let opf_result: Result<Pipeline, String> =
+                        Err("opf-rs removed (LEG-810)".to_string());
+                    match opf_result {
+                        Ok(pipeline) => pipeline,
                         Err(e) => {
                             if std::env::var("TINFOIL_API_KEY").is_ok()
                                 || std::env::var("TINFOIL_BASE_URL").is_ok()

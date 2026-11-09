@@ -46,8 +46,5 @@ pub mod tinfoil_image;
 #[cfg(feature = "onnx-cpu")]
 pub mod onnx;
 
-#[cfg(feature = "opf-text")]
-pub mod opf;
-
 pub mod rfdetr;
 pub mod rfdetr_mlx;

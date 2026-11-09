@@ -86,12 +86,6 @@ onnx-coreml = ["onnx-cpu", "ort/coreml"]
 # Windows: DirectML EP (any DX12-capable GPU, no CUDA toolkit).
 onnx-directml = ["onnx-cpu", "ort/directml"]
 
-# Enable the candle-based OPF text redactor via the opf-rs crate. Off
-# by default; opt-in for local dev / packaged builds that ship the
-# 2.8 GB checkpoint. Mac builds get Metal acceleration through opf-rs's
-# default `metal` feature.
-opf-text = ["dep:opf"]
-
 # Mac: rfdetr image PII via mlx-rs (Apple Silicon-only, ~6× faster
 # than CoreML EP for this model). Picks up the same HF model file as
 # `onnx-coreml` but converts to safetensors at first run via
@@ -151,31 +145,9 @@ optional = true
 [dependencies.serde_json]
 workspace = true
 
-# OPF text redactor (pure-Rust candle port; same model as the v3
-# fine-tune on HF). Pinned to a commit so reproducible across CI
-# runners — bump the rev together with the model checkpoint version
-# whenever opf-rs ships a meaningful change.
-#
-# `default-features = false` drops opf-rs's `metal` default, which
-# transitively pulls in `objc2` and breaks Linux/Windows release
-# builds (`objc2` is Apple-only). The Metal backend is re-enabled
-# below in a target-conditional entry so Mac builds still get GPU
-# acceleration.
-[dependencies.opf]
-git = "https://github.com/screenpipe/opf-rs"
-rev = "e725ad5e8a89ae46e4cb38022a26e746c37329b6"
-optional = true
-default-features = false
-
-# Re-enable the `metal` feature only on Apple targets. Cargo merges
-# target-conditional dep entries into the base entry above, so this
-# is purely additive — Linux/Windows still see `default-features =
-# false` and stay clear of objc2.
-[target.'cfg(target_os = "macos")'.dependencies.opf]
-git = "https://github.com/screenpipe/opf-rs"
-rev = "e725ad5e8a89ae46e4cb38022a26e746c37329b6"
-optional = true
-features = ["metal"]
+# opf-rs (candle OPF text redactor) removed 2026-11-09: CC BY-NC 4.0 source,
+# not licensed for commercial builds, and it pulled zip 7.2 via candle 0.10
+# (GHSA-m665 Critical). The v45 ONNX adapter is the local text-PII path. LEG-810.
 
 # MLX-based rfdetr runtime — Apple-Silicon-only (mlx-rs links against
 # Metal Performance Shaders Graph, which is unavailable on Intel
