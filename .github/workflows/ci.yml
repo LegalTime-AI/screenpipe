@@ -350,7 +350,7 @@ jobs:
     # commits, then red on the next 2 with no related code change). macos-14
     # (Sonoma) has a complete toolchain and is proven here — e2e-macos.yml builds
     # screenpipe-screen on it and passes. Revisit when macos-latest is fixed.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
