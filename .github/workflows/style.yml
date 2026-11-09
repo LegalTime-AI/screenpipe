@@ -14,6 +14,10 @@ jobs:
   lint:
     name: Clippy & Format
     runs-on: ubuntu-latest
+    env:
+      # antirez-asr-sys (qwen-asr C) calls strdup under -std=c11; GCC 14 makes the
+      # implicit declaration a hard error. _GNU_SOURCE declares it.
+      CFLAGS: -D_GNU_SOURCE
     steps:
       - uses: actions/checkout@v4
 

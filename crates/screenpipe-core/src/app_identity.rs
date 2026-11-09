@@ -55,9 +55,7 @@ pub fn frontmost_app() -> Option<(i32, String)> {
 /// so a fault anywhere in the accessibility stack cannot stop time capture.
 pub fn accessibility_disabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("SCREENPIPE_DISABLE_ACCESSIBILITY").as_deref() == Ok("1")
-    })
+    *V.get_or_init(|| std::env::var("SCREENPIPE_DISABLE_ACCESSIBILITY").as_deref() == Ok("1"))
 }
 
 /// The bundle (`.app`, `.appex` or `.xpc`) whose main executable is `exe`,
@@ -195,12 +193,14 @@ mod imp {
 
     pub fn use_safe_app_identity() -> bool {
         static V: OnceLock<bool> = OnceLock::new();
-        *V.get_or_init(|| match std::env::var("SCREENPIPE_SAFE_APP_IDENTITY").as_deref() {
-            Ok("1") => true,
-            Ok("0") => false,
-            // Unknown version: take the safe path (no crash, names still right).
-            _ => macos_major().map_or(true, |m| m < 13),
-        })
+        *V.get_or_init(
+            || match std::env::var("SCREENPIPE_SAFE_APP_IDENTITY").as_deref() {
+                Ok("1") => true,
+                Ok("0") => false,
+                // Unknown version: take the safe path (no crash, names still right).
+                _ => macos_major().map_or(true, |m| m < 13),
+            },
+        )
     }
 
     fn macos_major() -> Option<u32> {
@@ -240,7 +240,11 @@ mod imp {
         if CFStringGetCString(s, buf.as_mut_ptr() as *mut c_char, cap, UTF8) == 0 {
             return None;
         }
-        let out = CStr::from_bytes_until_nul(&buf).ok()?.to_str().ok()?.to_owned();
+        let out = CStr::from_bytes_until_nul(&buf)
+            .ok()?
+            .to_str()
+            .ok()?
+            .to_owned();
         (!out.is_empty()).then_some(out)
     }
 
@@ -289,7 +293,10 @@ mod imp {
             if cf_i64(CFDictionaryGetValue(dict, kCGWindowLayer)) != Some(0) {
                 return None;
             }
-            Some((owner as i32, cf_string(CFDictionaryGetValue(dict, kCGWindowOwnerName))))
+            Some((
+                owner as i32,
+                cf_string(CFDictionaryGetValue(dict, kCGWindowOwnerName)),
+            ))
         })?;
         let name = name.or_else(|| app_name_for_pid(pid)).unwrap_or_default();
         Some((pid, name))
@@ -307,7 +314,9 @@ mod imp {
 
     pub fn bundle_path_for_pid(pid: i32) -> Option<PathBuf> {
         static CACHE: PidCache<Option<PathBuf>> = OnceLock::new();
-        cached(&CACHE, pid, || super::innermost_app_bundle(&executable_path(pid)?))
+        cached(&CACHE, pid, || {
+            super::innermost_app_bundle(&executable_path(pid)?)
+        })
     }
 
     fn with_bundle<T>(pid: i32, f: impl FnOnce(CFTypeRef) -> Option<T>) -> Option<T> {
@@ -414,7 +423,8 @@ mod tests {
             Path::new("/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app")
         );
         assert_eq!(
-            innermost_app_bundle(Path::new("/Applications/Safari.app/Contents/MacOS/Safari")).unwrap(),
+            innermost_app_bundle(Path::new("/Applications/Safari.app/Contents/MacOS/Safari"))
+                .unwrap(),
             Path::new("/Applications/Safari.app")
         );
         assert!(innermost_app_bundle(Path::new("/usr/bin/ssh")).is_none());

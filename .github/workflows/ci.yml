@@ -34,6 +34,8 @@ jobs:
   test-ubuntu:
     runs-on: ubuntu-latest
     env:
+      # see style.yml: strdup in antirez-asr-sys under GCC 14
+      CFLAGS: -D_GNU_SOURCE
       RUSTFLAGS: "-C link-arg=-Wl,--allow-multiple-definition"
     steps:
       - uses: actions/checkout@v4
@@ -348,7 +350,7 @@ jobs:
     # commits, then red on the next 2 with no related code change). macos-14
     # (Sonoma) has a complete toolchain and is proven here — e2e-macos.yml builds
     # screenpipe-screen on it and passes. Revisit when macos-latest is fixed.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
