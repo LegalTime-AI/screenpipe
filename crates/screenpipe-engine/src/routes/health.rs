@@ -468,6 +468,16 @@ pub struct AudioPipelineHealthInfo {
 /// killed by a watchdog).
 const HEALTH_RESPONSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// A cache entry stamped `stamped` (unix secs) is fresh at `now` only if it is not from the future and younger than
+/// `ttl_secs`. LegalTime LEG-594 (capture scenario win-clock-jump): when the wall clock goes BACK (a time-sync
+/// correction of a fast clock, a manual change, a dead RTC battery), the last entry written before the correction is
+/// stamped ahead of `now`; `now.saturating_sub(stamped)` is then 0, so that one snapshot was served as "fresh" until
+/// the clock caught up again (an hour after a 1 h correction): frame counters, last frame and status all frozen, and
+/// every watchdog that reads /health blind for that long, while capture itself kept writing.
+fn cache_stamp_is_fresh(now: u64, stamped: u64, ttl_secs: u64) -> bool {
+    stamped <= now && now - stamped < ttl_secs
+}
+
 fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -488,7 +498,7 @@ where
     let now = unix_now_secs();
     {
         let cached = cache.read().await;
-        if now.saturating_sub(cached.0) < ttl_secs {
+        if cache_stamp_is_fresh(now, cached.0, ttl_secs) {
             if let Some(response) = cached.1.as_ref() {
                 return response.clone();
             }
@@ -516,7 +526,7 @@ where
     let now = unix_now_secs();
     {
         let cached = cache.read().await;
-        if now.saturating_sub(cached.0) < ttl_secs {
+        if cache_stamp_is_fresh(now, cached.0, ttl_secs) {
             if let Some(response) = cached.1.as_ref() {
                 return response.clone();
             }
@@ -621,7 +631,10 @@ async fn get_audio_reconciliation_backlog(
 ) -> Option<(u64, Option<DateTime<Utc>>)> {
     {
         let cache = AUDIO_RECONCILIATION_BACKLOG_CACHE.read().await;
-        if now.timestamp().saturating_sub(cache.0) < AUDIO_RECONCILIATION_BACKLOG_CACHE_TTL_SECS {
+        // LEG-594: a stamp from the future (the clock went back) is stale, not fresh for the length of the jump.
+        if cache.0 <= now.timestamp()
+            && now.timestamp() - cache.0 < AUDIO_RECONCILIATION_BACKLOG_CACHE_TTL_SECS
+        {
             return cache.1;
         }
     }
@@ -720,7 +733,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         let device_active = if app_uptime < grace_period {
             true // Consider active during grace period
         } else {
-            now - last_capture < 5 // Consider active if captured in last 5 seconds
+            now.saturating_sub(last_capture) < 5 // Consider active if captured in last 5 seconds (LEG-594: no wrap if the clock went back)
         };
 
         // Track if any device is active
@@ -738,7 +751,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         global_audio_active = if app_uptime < grace_period {
             true // Consider active during grace period
         } else {
-            now - last_capture < 5 // Consider active if captured in last 5 seconds
+            now.saturating_sub(last_capture) < 5 // Consider active if captured in last 5 seconds (LEG-594: no wrap if the clock went back)
         };
     }
 
@@ -956,7 +969,9 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         "ok" // screen locked — no captures expected, not a real stall
     } else if last_frame_ts == 0 {
         "not_started"
-    } else if now.timestamp() as u64 - last_frame_ts < threshold_secs {
+    } else if (now.timestamp() as u64).saturating_sub(last_frame_ts) < threshold_secs {
+        // LEG-594: saturating, so a frame stamped ahead of a clock that went back reads as recent instead of wrapping
+        // to a huge age ("stale") for the length of the jump.
         "ok"
     } else {
         "stale"
@@ -1675,6 +1690,35 @@ mod tests {
 
         assert_eq!(state.status, "audio_stalled");
         assert_eq!(state.severity, "warning");
+    }
+
+    #[test]
+    fn cache_stamp_from_the_future_is_stale() {
+        // LEG-594: the clock went back an hour after this entry was written.
+        let now = 1_794_430_000;
+        assert!(!cache_stamp_is_fresh(now, now + 3_600, 1));
+        assert!(!cache_stamp_is_fresh(now, now + 1, 1));
+        assert!(cache_stamp_is_fresh(now, now, 1));
+        assert!(!cache_stamp_is_fresh(now, now - 1, 1));
+        assert!(cache_stamp_is_fresh(now, now - 29, 30));
+    }
+
+    #[tokio::test]
+    async fn health_cache_entry_from_before_a_backward_clock_jump_is_refreshed() {
+        // LEG-594: the cached snapshot is stamped an hour ahead (written just before a 1 h backward correction);
+        // the next request must compute a fresh response instead of serving the frozen one for an hour.
+        let ahead = unix_now_secs() + 3_600;
+        let cache = RwLock::new((ahead, Some(dummy_response("frozen"))));
+        let refresh = Mutex::new(());
+        let computes = AtomicU64::new(0);
+        let response = cached_health_or_refresh(&cache, &refresh, HEALTH_CACHE_TTL_SECS, || async {
+            computes.fetch_add(1, Ordering::SeqCst);
+            Some(dummy_response("healthy"))
+        })
+        .await;
+        assert_eq!(response.status, "healthy");
+        assert_eq!(computes.load(Ordering::SeqCst), 1);
+        assert!(cache.read().await.0 <= unix_now_secs());
     }
 
     #[tokio::test]
