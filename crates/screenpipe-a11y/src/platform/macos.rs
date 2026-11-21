@@ -766,6 +766,48 @@ impl Drop for InstalledTap {
     }
 }
 
+/// One slice of the calling thread's run loop, for the polling loops below
+/// (`while !stop { run_loop_slice(..) }`).
+///
+/// `CFRunLoopRunInMode` returns `Finished` at once when the mode has no
+/// sources or timers. The app-observer thread has none whenever no AXObserver
+/// is attached (the focused app could not be read or observed: Accessibility
+/// not granted yet, screen locked, an app without AX), so its loop spun a full
+/// CPU core (LegalTime Mac QA mini, 2026-11-21: one engine thread at ~100%,
+/// sampled in CFRunLoopRunSpecific -> __CFRunLoopCopyMode, with LegalTime's
+/// capture on or off and with the screen locked or not). Sleep out the rest of
+/// the slice in that case; a slice that handled a source or timed out returns
+/// exactly as before.
+fn run_loop_slice(mode: &cf::RunLoopMode, seconds: f64) -> cf::RunLoopRunResult {
+    let started = Instant::now();
+    let result = cf::RunLoop::run_in_mode(mode, seconds, true);
+    if result == cf::RunLoopRunResult::Finished {
+        if let Some(rest) = Duration::from_secs_f64(seconds).checked_sub(started.elapsed()) {
+            thread::sleep(rest);
+        }
+    }
+    result
+}
+
+/// How often the app-observer thread re-reads the focused app without a refresh
+/// request. Refresh requests come from AX (de)activation notifications of the
+/// observed app or NSWorkspace notices, and neither is reliable in the engine:
+/// the NSWorkspace notices need an AppKit main run loop the engine does not run,
+/// an engine whose first attach found no readable focused app has no observed
+/// app, and an observer attached to the LegalTime (Electron) app reported no
+/// switch away from it. On the Mac QA mini each case left focus stuck: no
+/// app_switch / window_focus events for the rest of the run (and, before
+/// run_loop_slice, ~100% of a core). The re-read is cheap and deduplicated:
+/// emit_focus_state only sends events when the app or window title changed.
+const FOCUS_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether the app-observer loop should re-read the focused app (and reattach
+/// when it changed) now: on any refresh request, and once per
+/// FOCUS_RECHECK_INTERVAL otherwise.
+fn should_check_focus(refresh_requested: bool, since_last_check: Duration) -> bool {
+    refresh_requested || since_last_check >= FOCUS_RECHECK_INTERVAL
+}
+
 fn run_event_tap(
     tx: Sender<UiEvent>,
     stop: Arc<AtomicBool>,
@@ -915,7 +957,7 @@ fn run_event_tap(
     // — the callback already goes inert the instant `stop` is set — this just
     // bounds how long the final buffer flush is delayed.)
     while !stop.load(Ordering::Acquire) {
-        cf::RunLoop::run_in_mode(cf::RunLoopMode::default(), 0.01, true);
+        run_loop_slice(cf::RunLoopMode::default(), 0.01);
 
         // Release the lock BEFORE calling remove_pii — holding the mutex
         // during an expensive regex blocks the event-tap callback on every
@@ -1562,11 +1604,14 @@ fn run_app_observer(
         emit_focus_state(unsafe { &*callback_state_ptr });
     };
 
+    let mut last_check = Instant::now();
     while !stop.load(Ordering::Acquire) {
-        cf::RunLoop::run_in_mode(run_loop_mode, 0.1, true);
+        run_loop_slice(run_loop_mode, 0.1);
 
-        if refresh_requested.swap(false, Ordering::SeqCst) {
+        let refresh = refresh_requested.swap(false, Ordering::SeqCst);
+        if should_check_focus(refresh, last_check.elapsed()) {
             reattach_observer();
+            last_check = Instant::now();
         }
     }
 
@@ -1621,7 +1666,7 @@ fn run_app_observer(
     // Let the run loop propagate the disconnect to Chromium/Electron before
     // the thread exits — prevents the replay of buffered keystrokes.
     for _ in 0..3 {
-        cf::RunLoop::run_in_mode(run_loop_mode, 0.05, true);
+        run_loop_slice(run_loop_mode, 0.05);
     }
 
     debug!("AXObserver shutdown: complete");
@@ -2602,7 +2647,7 @@ fn run_activity_only_tap(activity_feed: ActivityFeed, stop: Arc<AtomicBool>) {
     debug!("Activity-only event tap started");
 
     while !stop.load(Ordering::Relaxed) {
-        cf::RunLoop::run_in_mode(cf::RunLoopMode::default(), 0.01, true);
+        run_loop_slice(cf::RunLoopMode::default(), 0.01);
     }
 
     // Stop event delivery and drain BEFORE freeing the callback's user_info,
@@ -2689,6 +2734,42 @@ mod tests {
         assert_eq!(
             carbon_modifier_state(Modifiers(Modifiers::OPT)),
             CARBON_OPTION_KEY >> 8
+        );
+    }
+
+    #[test]
+    fn app_observer_rechecks_focus_once_a_second_without_a_refresh_request() {
+        // A refresh request (AX or NSWorkspace notice) checks at once.
+        assert!(should_check_focus(true, Duration::ZERO));
+        // Otherwise once a second, not on every 100 ms run-loop slice.
+        assert!(!should_check_focus(false, Duration::from_millis(900)));
+        assert!(should_check_focus(false, FOCUS_RECHECK_INTERVAL));
+    }
+
+    #[test]
+    fn run_loop_slice_sleeps_when_the_mode_has_no_sources() {
+        // A fresh thread's run loop has no sources or timers, like the
+        // app-observer thread with no AXObserver attached: CFRunLoopRunInMode
+        // returns Finished at once, and a polling loop around it spun a core.
+        let (elapsed, finished) = std::thread::spawn(|| {
+            let started = Instant::now();
+            let mut finished = 0;
+            for _ in 0..5 {
+                if run_loop_slice(cf::RunLoopMode::default(), 0.02)
+                    == cf::RunLoopRunResult::Finished
+                {
+                    finished += 1;
+                }
+            }
+            (started.elapsed(), finished)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(finished, 5);
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "5 empty 20 ms slices returned after {:?} (busy loop)",
+            elapsed
         );
     }
 
