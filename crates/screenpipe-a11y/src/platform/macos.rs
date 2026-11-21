@@ -789,6 +789,25 @@ fn run_loop_slice(mode: &cf::RunLoopMode, seconds: f64) -> cf::RunLoopRunResult 
     result
 }
 
+/// How often the app-observer thread re-reads the focused app without a refresh
+/// request. Refresh requests come from AX (de)activation notifications of the
+/// observed app or NSWorkspace notices, and neither is reliable in the engine:
+/// the NSWorkspace notices need an AppKit main run loop the engine does not run,
+/// an engine whose first attach found no readable focused app has no observed
+/// app, and an observer attached to the LegalTime (Electron) app reported no
+/// switch away from it. On the Mac QA mini each case left focus stuck: no
+/// app_switch / window_focus events for the rest of the run (and, before
+/// run_loop_slice, ~100% of a core). The re-read is cheap and deduplicated:
+/// emit_focus_state only sends events when the app or window title changed.
+const FOCUS_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether the app-observer loop should re-read the focused app (and reattach
+/// when it changed) now: on any refresh request, and once per
+/// FOCUS_RECHECK_INTERVAL otherwise.
+fn should_check_focus(refresh_requested: bool, since_last_check: Duration) -> bool {
+    refresh_requested || since_last_check >= FOCUS_RECHECK_INTERVAL
+}
+
 fn run_event_tap(
     tx: Sender<UiEvent>,
     stop: Arc<AtomicBool>,
@@ -1585,11 +1604,14 @@ fn run_app_observer(
         emit_focus_state(unsafe { &*callback_state_ptr });
     };
 
+    let mut last_check = Instant::now();
     while !stop.load(Ordering::Acquire) {
         run_loop_slice(run_loop_mode, 0.1);
 
-        if refresh_requested.swap(false, Ordering::SeqCst) {
+        let refresh = refresh_requested.swap(false, Ordering::SeqCst);
+        if should_check_focus(refresh, last_check.elapsed()) {
             reattach_observer();
+            last_check = Instant::now();
         }
     }
 
@@ -2713,6 +2735,15 @@ mod tests {
             carbon_modifier_state(Modifiers(Modifiers::OPT)),
             CARBON_OPTION_KEY >> 8
         );
+    }
+
+    #[test]
+    fn app_observer_rechecks_focus_once_a_second_without_a_refresh_request() {
+        // A refresh request (AX or NSWorkspace notice) checks at once.
+        assert!(should_check_focus(true, Duration::ZERO));
+        // Otherwise once a second, not on every 100 ms run-loop slice.
+        assert!(!should_check_focus(false, Duration::from_millis(900)));
+        assert!(should_check_focus(false, FOCUS_RECHECK_INTERVAL));
     }
 
     #[test]
