@@ -766,6 +766,29 @@ impl Drop for InstalledTap {
     }
 }
 
+/// One slice of the calling thread's run loop, for the polling loops below
+/// (`while !stop { run_loop_slice(..) }`).
+///
+/// `CFRunLoopRunInMode` returns `Finished` at once when the mode has no
+/// sources or timers. The app-observer thread has none whenever no AXObserver
+/// is attached (the focused app could not be read or observed: Accessibility
+/// not granted yet, screen locked, an app without AX), so its loop spun a full
+/// CPU core (LegalTime Mac QA mini, 2026-11-21: one engine thread at ~100%,
+/// sampled in CFRunLoopRunSpecific -> __CFRunLoopCopyMode, with LegalTime's
+/// capture on or off and with the screen locked or not). Sleep out the rest of
+/// the slice in that case; a slice that handled a source or timed out returns
+/// exactly as before.
+fn run_loop_slice(mode: &cf::RunLoopMode, seconds: f64) -> cf::RunLoopRunResult {
+    let started = Instant::now();
+    let result = cf::RunLoop::run_in_mode(mode, seconds, true);
+    if result == cf::RunLoopRunResult::Finished {
+        if let Some(rest) = Duration::from_secs_f64(seconds).checked_sub(started.elapsed()) {
+            thread::sleep(rest);
+        }
+    }
+    result
+}
+
 fn run_event_tap(
     tx: Sender<UiEvent>,
     stop: Arc<AtomicBool>,
@@ -915,7 +938,7 @@ fn run_event_tap(
     // — the callback already goes inert the instant `stop` is set — this just
     // bounds how long the final buffer flush is delayed.)
     while !stop.load(Ordering::Acquire) {
-        cf::RunLoop::run_in_mode(cf::RunLoopMode::default(), 0.01, true);
+        run_loop_slice(cf::RunLoopMode::default(), 0.01);
 
         // Release the lock BEFORE calling remove_pii — holding the mutex
         // during an expensive regex blocks the event-tap callback on every
@@ -1563,7 +1586,7 @@ fn run_app_observer(
     };
 
     while !stop.load(Ordering::Acquire) {
-        cf::RunLoop::run_in_mode(run_loop_mode, 0.1, true);
+        run_loop_slice(run_loop_mode, 0.1);
 
         if refresh_requested.swap(false, Ordering::SeqCst) {
             reattach_observer();
@@ -1621,7 +1644,7 @@ fn run_app_observer(
     // Let the run loop propagate the disconnect to Chromium/Electron before
     // the thread exits — prevents the replay of buffered keystrokes.
     for _ in 0..3 {
-        cf::RunLoop::run_in_mode(run_loop_mode, 0.05, true);
+        run_loop_slice(run_loop_mode, 0.05);
     }
 
     debug!("AXObserver shutdown: complete");
@@ -2602,7 +2625,7 @@ fn run_activity_only_tap(activity_feed: ActivityFeed, stop: Arc<AtomicBool>) {
     debug!("Activity-only event tap started");
 
     while !stop.load(Ordering::Relaxed) {
-        cf::RunLoop::run_in_mode(cf::RunLoopMode::default(), 0.01, true);
+        run_loop_slice(cf::RunLoopMode::default(), 0.01);
     }
 
     // Stop event delivery and drain BEFORE freeing the callback's user_info,
@@ -2689,6 +2712,33 @@ mod tests {
         assert_eq!(
             carbon_modifier_state(Modifiers(Modifiers::OPT)),
             CARBON_OPTION_KEY >> 8
+        );
+    }
+
+    #[test]
+    fn run_loop_slice_sleeps_when_the_mode_has_no_sources() {
+        // A fresh thread's run loop has no sources or timers, like the
+        // app-observer thread with no AXObserver attached: CFRunLoopRunInMode
+        // returns Finished at once, and a polling loop around it spun a core.
+        let (elapsed, finished) = std::thread::spawn(|| {
+            let started = Instant::now();
+            let mut finished = 0;
+            for _ in 0..5 {
+                if run_loop_slice(cf::RunLoopMode::default(), 0.02)
+                    == cf::RunLoopRunResult::Finished
+                {
+                    finished += 1;
+                }
+            }
+            (started.elapsed(), finished)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(finished, 5);
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "5 empty 20 ms slices returned after {:?} (busy loop)",
+            elapsed
         );
     }
 
